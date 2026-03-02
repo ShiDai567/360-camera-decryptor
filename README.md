@@ -54,9 +54,65 @@
 
 ## 快速开始
 
-### 方式1: 使用视频流解密工具（推荐）
+### 方式1: 使用 Python API 请求工具（推荐）
 
-直接打开 [`index.html`](index.html)，输入API返回的JSON数据，点击"解析JSON"按钮，然后选择解密配置进行测试。
+使用 Python 工具批量获取摄像机播放信息：
+
+```bash
+# 1. 安装依赖
+pip install -r requirements.txt
+
+# 2. 创建配置文件
+cp config.example.yaml config.yaml
+
+# 3. 编辑 config.yaml，填入 Cookie 和摄像机信息
+
+# 4. 运行脚本
+python get_play_info.py
+```
+
+**配置文件示例** (`config.yaml`):
+
+```yaml
+# Cookie 配置
+cookie: |
+  __guid=xxx;
+  jia_web_sid=xxx;
+
+# 摄像机列表
+cameras:
+  - name: "摄像机1"
+    sn: "3601Q0700624502"
+    enabled: true
+    api_version: "v2"  # API 版本: v1 或 v2
+
+  - name: "摄像机2"
+    sn: "360234A00027519"
+    enabled: true
+    api_version: "v2"
+
+# 请求配置
+request_interval: 2  # 每个摄像机请求之间的间隔（秒）
+
+# 输出配置
+output:
+  directory: "./output"
+  format: "json"
+  filename_template: "{name}_{sn}"
+```
+
+**获取 Cookie**:
+1. 打开浏览器（Chrome/Edge/Firefox）
+2. 访问 360智能摄像机网页并登录
+3. 按 F12 打开开发者工具
+4. 切换到 "Network"（网络）标签
+5. 刷新页面，找到任意请求
+6. 查看 "Request Headers" 中的 "Cookie"
+7. 复制完整的 Cookie 值
+
+### 方式2: 使用视频流解密工具
+
+获取播放信息后，打开 [`web/index.html`](web/index.html)，输入JSON数据，点击"解析JSON"按钮，然后选择解密配置进行测试。
 
 ### 方式2: 使用解密工具类
 
@@ -98,14 +154,71 @@ const player = decryptor.createPlayer(info.videoUrl, config, container);
 player.play();
 ```
 
+## Python API 请求工具
+
+### 文件说明
+
+| 文件 | 说明 |
+|------|------|
+| `get_play_info.py` | 配置文件批量获取工具 |
+| `camera_api_cli.py` | 命令行工具 |
+| `config.example.yaml` | 配置文件模板 |
+| `config.yaml` | 实际配置文件（需自行创建） |
+| `requirements.txt` | Python 依赖列表 |
+
+### 使用方法
+
+**批量获取**（推荐）:
+```bash
+python get_play_info.py
+```
+
+**单个获取**:
+```bash
+python camera_api_cli.py --sn 3601Q0700624502 --cookie-file cookies.txt
+```
+
+### 输出文件
+
+每个摄像机的播放信息会保存为独立的 JSON 文件：
+
+```json
+{
+  "errorCode": 0,
+  "playKey": "解密密钥",
+  "relay": ["中继服务器地址"],
+  "relayId": "中继ID",
+  "relaySig": "中继签名",
+  "relayStream": "中继流标识",
+  "flashUrl": "视频流完整URL",
+  "errorMsg": "成功",
+  "data": {},
+  "camera_name": "摄像机名称",
+  "camera_sn": "摄像机SN号"
+}
+```
+
+### 常见问题
+
+**Q: 请求返回 401 或 403 错误？**
+A: Cookie 可能已过期或不正确。请重新从浏览器获取最新的 Cookie。
+
+**Q: 如何获取摄像机 SN 号？**
+A: SN 号通常在以下位置：
+1. 摄像机设备标签上
+2. 360智能摄像机 APP 中
+3. 图片 URL 中
+
+**Q: v1 和 v2 接口有什么区别？**
+A: v2 接口是新版本，支持更多功能。大多数摄像机建议使用 v2 接口。
+
 ## 加密机制分析
 
 ### 视频流获取流程
 
-1. 用户点击预览图片 → 触发播放器初始化
-2. AJAX请求 `/app/play` 或 `/app/playV2` 接口
-3. 服务器返回 `relayStream`（中继流标识）和 `playKey`（解密密钥）
-4. 播放器使用 `playKey` 解密并播放视频流
+1. 使用 Python 工具获取播放信息（`playKey`、`flashUrl` 等）
+2. 将 JSON 数据输入到 [`web/index.html`](web/index.html)
+3. 播放器使用 `playKey` 解密并播放视频流
 
 ### 关键参数
 

@@ -1,0 +1,32 @@
+# 360智能摄像机配置文件
+# 请复制此文件为 config.yaml 并填入实际数据
+
+# Cookie 配置
+cookie: |
+  xxxxxxxxxxxxxxxx
+
+# 摄像机列表
+cameras:
+  - enabled: true
+    name: "摄像机1"
+    sn: "xxxxxxxx"
+    # API 版本: v1 或 v2，默认 v2
+    api_version: "v2"
+
+  - name: "摄像机2"
+    sn: "xxxxxxxx"
+    enabled: true
+    api_version: "v1"
+
+# 请求配置
+# 每个摄像机请求之间的间隔（秒）
+request_interval: 3
+
+# 输出配置
+output:
+  # 输出目录
+  directory: "./output"
+  # 输出格式: json
+  format: "json"
+  # 文件名模板
+  filename_template: "{name}_{sn}"

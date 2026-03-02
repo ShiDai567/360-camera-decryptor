@@ -1,0 +1,16 @@
+# 敏感文件 - 不要提交到版本控制
+result.json
+config.yaml
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyc
+.Python
+.venv/
+venv/
+ENV/
+env/
