@@ -74,12 +74,22 @@ class CameraBackendService:
 
     def _fetch_from_remote(self, sn: str, camera: Dict[str, Any], api: CameraAPIRequest) -> Dict[str, Any]:
         preferred_is_v2 = camera.get("api_version", "v2").lower() == "v2"
+        last_result: Dict[str, Any] = {"errorCode": -1, "errorMsg": "获取播放信息失败"}
         for is_v2 in [preferred_is_v2, not preferred_is_v2]:
             result = api.get_play_info_from_api(sn, is_v2=is_v2)
             if result and result.get("errorCode") == 0:
                 result["api_version"] = "v2" if is_v2 else "v1"
                 return result
-        return result or {"errorCode": -1, "errorMsg": "获取播放信息失败"}
+            if result:
+                last_result = result
+
+        app.logger.warning(
+            "play-info upstream failed for sn=%s camera=%s result=%s",
+            sn,
+            camera.get("name", ""),
+            last_result,
+        )
+        return last_result
 
     def get_play_info(self, sn: str, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
