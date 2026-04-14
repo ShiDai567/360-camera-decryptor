@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
@@ -44,16 +43,6 @@ class CameraBackendService:
 
     def get_request_interval(self) -> float:
         return float(self.load_config().get("request_interval", 2))
-
-    def get_output_settings(self) -> Dict[str, Any]:
-        config = self.load_config()
-        output_config = config.get("output", {})
-        output_dir = (self.config_path.parent / output_config.get("directory", "./output")).resolve()
-        return {
-            "directory": output_dir,
-            "filename_template": output_config.get("filename_template", "{name}_{sn}"),
-            "format": output_config.get("format", "json"),
-        }
 
     def list_cameras(self) -> list[Dict[str, Any]]:
         config = self.load_config()
@@ -121,20 +110,7 @@ class CameraBackendService:
             raise ConfigError(payload.get("errorMsg", "未获取到 flashUrl"))
         return flash_url
 
-    def save_play_info(self, payload: Dict[str, Any]) -> str:
-        output_settings = self.get_output_settings()
-        output_dir = output_settings["directory"]
-        output_dir.mkdir(parents=True, exist_ok=True)
-        filename = output_settings["filename_template"].format(
-            name=payload.get("camera_name", "Unknown"),
-            sn=payload.get("camera_sn", ""),
-        )
-        output_path = output_dir / f"{filename}.json"
-        with output_path.open("w", encoding="utf-8") as handle:
-            json.dump(payload, handle, indent=2, ensure_ascii=False)
-        return str(output_path)
-
-    def sync_camera(self, camera: Dict[str, Any], force_refresh: bool = True, save: bool = True) -> Dict[str, Any]:
+    def sync_camera(self, camera: Dict[str, Any], force_refresh: bool = True) -> Dict[str, Any]:
         sn = camera.get("sn", "")
         if not sn:
             return {"success": False, "camera_name": camera.get("name", ""), "camera_sn": "", "errorMsg": "SN 号为空，跳过"}
@@ -156,11 +132,9 @@ class CameraBackendService:
             "api_version": payload.get("api_version", camera.get("api_version", "v2")),
             "payload": payload,
         }
-        if save:
-            result["output_path"] = self.save_play_info(payload)
         return result
 
-    def sync_all_cameras(self, force_refresh: bool = True, save: bool = True) -> Dict[str, Any]:
+    def sync_all_cameras(self, force_refresh: bool = True) -> Dict[str, Any]:
         cameras = [camera for camera in self.list_cameras() if camera.get("enabled", True)]
         interval = self.get_request_interval()
         results = []
@@ -169,7 +143,7 @@ class CameraBackendService:
         for index, camera in enumerate(cameras):
             if index > 0 and interval > 0:
                 time.sleep(interval)
-            result = self.sync_camera(camera, force_refresh=force_refresh, save=save)
+            result = self.sync_camera(camera, force_refresh=force_refresh)
             results.append(result)
             if result.get("success"):
                 success_count += 1
@@ -179,7 +153,6 @@ class CameraBackendService:
             "success": success_count,
             "failed": len(cameras) - success_count,
             "request_interval": interval,
-            "output_directory": str(self.get_output_settings()["directory"]),
             "results": results,
         }
 
@@ -251,22 +224,10 @@ def play_info() -> Response:
     return jsonify(payload)
 
 
-@app.route("/api/play-info/<sn>/save", methods=["POST"])
-def save_single_play_info(sn: str) -> Response:
-    try:
-        result = service.sync_camera(service.find_camera(sn), force_refresh=request.args.get("refresh", "1") == "1", save=True)
-    except ConfigError as exc:
-        return jsonify({"error": str(exc)}), 400
-    return (jsonify(result), 200) if result.get("success") else (jsonify(result), 502)
-
-
 @app.route("/api/play-info/sync", methods=["POST"])
 def sync_all_play_info() -> Response:
     try:
-        summary = service.sync_all_cameras(
-            force_refresh=request.args.get("refresh", "1") == "1",
-            save=request.args.get("save", "1") == "1",
-        )
+        summary = service.sync_all_cameras(force_refresh=request.args.get("refresh", "1") == "1")
     except ConfigError as exc:
         return jsonify({"error": str(exc)}), 400
     return jsonify(summary), 200 if summary.get("failed", 0) == 0 else 207

@@ -18,9 +18,9 @@ def main() -> None:
         epilog="""
 使用示例:
 
-  python camera_api_cli.py --url "https://ipcmaster-sh-..."
-  python camera_api_cli.py --sn 3601Q0700624502 --cookie-file cookies.txt
-  python camera_api_cli.py --sn 3601Q0700624502 --cookie "a=b; c=d"
+  python -m app.cli --url "https://ipcmaster-sh-..."
+  python -m app.cli --sn 3601Q0700624502 --cookie-file cookies.txt
+  python -m app.cli --sn 3601Q0700624502 --cookie "a=b; c=d"
         """,
     )
     parser.add_argument("--url", "-u", help="图片 URL")

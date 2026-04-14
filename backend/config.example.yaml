@@ -29,12 +29,3 @@ server:
   # 部署在反向代理后面时，显式指定前端可访问的后端公网地址
   # 例如: "https://you.domain.com"
   public_base_url: ""
-
-# 输出配置
-output:
-  # 输出目录
-  directory: "./output"
-  # 输出格式: json
-  format: "json"
-  # 文件名模板
-  filename_template: "{name}_{sn}"

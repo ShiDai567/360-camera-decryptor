@@ -10,8 +10,6 @@
 保留的入口文件：
 
 - `backend/server.py`
-- `backend/get_play_info.py`
-- `backend/camera_api_cli.py`
 
 这样做的目的是让核心逻辑集中，同时不破坏原来的启动方式。
 
@@ -20,7 +18,6 @@
 - `GET /api/cameras`
 - `GET /api/play-info?sn=...`
 - `GET /api/stream/<sn>`
-- `POST /api/play-info/<sn>/save`
 - `POST /api/play-info/sync`
 
 ## 常用命令
@@ -29,6 +26,4 @@
 cd backend
 pip install -r requirements.txt
 python server.py
-python get_play_info.py
-python camera_api_cli.py --sn 3601Q0700624502 --cookie-file cookies.txt
 ```
