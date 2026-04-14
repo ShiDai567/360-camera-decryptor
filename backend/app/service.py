@@ -21,7 +21,7 @@ from .api_client import CameraAPIRequest
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 BACKEND_DIR = ROOT_DIR / "backend"
-WEB_DIR = ROOT_DIR / "web"
+WEB_DIR = ROOT_DIR / "frontend"
 
 
 class ConfigError(RuntimeError):
