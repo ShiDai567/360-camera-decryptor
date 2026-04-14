@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from server import CameraBackendService, ConfigError
+from app.service import CameraBackendService, ConfigError
 
 
 def main() -> None:

@@ -1,322 +1,48 @@
-# 360智能摄像机视频流解密工具
+# 360智能摄像机视频流工具
 
-## 项目说明
+本项目当前分成三部分：
 
-本项目提供了360智能摄像机视频流加密机制的逆向分析和解密工具，可以用于学习和研究目的。当前版本已将原先“前端直连 360 流地址”的模式调整为“后端统一获取播放信息并代理视频流”，用于绕过浏览器跨域限制。
+- `backend/`
+  负责获取播放信息、批量同步、流代理和本地配置
+- `web/`
+  负责前端播放调试页和播放器资源
+- `docs/`
+  负责项目结构、后端说明和解密分析
+
 ![](./preview.jpg)
-
-## ⚠️ 重要提示
-
-如果画面颜色异常（如整体成绿色调），请尝试以下解决方案：
-
-1. **测试不同配置**: 使用 [`index.html`](index.html) 测试不同的解密配置
-2. **检查密钥**: 确认 `playKey` 是否正确
-3. **检查视频流**: 确认视频流地址是否可访问
-4. **查看日志**: 查看播放器日志了解详细错误信息
-
-## 文件说明
-
-### 核心文件
-
-1. **[`360_camera_decryptor.js`](360_camera_decryptor.js)** - 解密工具类
-
-   - `getPlayInfo(sn, isV2)` - 获取播放信息（包括密钥）
-   - `extractPlayInfo(apiResponse)` - 从API响应提取播放信息
-   - `createPlayer(videoUrl, playKey, container)` - 创建播放器实例
-   - `decryptAndPlay(sn, containerId)` - 一键解密并播放
-2. **[`decrypt_fix.js`](decrypt_fix.js)** - 解密修复方案
-
-   - 提供多种解密配置解决画面颜色问题
-   - `extractPlayInfo(apiResponse)` - 提取播放信息并生成多种配置
-   - `createPlayer(videoUrl, config, container)` - 创建播放器实例
-   - 支持4种不同的解密配置供测试
-3. **[`qhwwplayer.js`](qhwwplayer.js)** - QhwwPlayer播放器库
-
-   - 360自研的H.265视频播放器
-   - 支持WebAssembly解码
-   - 支持加密视频流播放
-4. **[`解密分析报告.md`](解密分析报告.md)** - 详细分析文档
-
-   - 完整的加密机制分析
-   - API接口说明
-   - 代码分析
-   - 使用方法和注意事项
-
-### 演示页面
-
-5. **[`index.html`](index.html)** - 视频流解密工具（主页面）
-   - 输入JSON数据自动解析视频流信息
-   - 测试多种解密配置
-   - 如果画面颜色异常，请使用此页面测试
-   - 实时日志输出
-   - 美化的UI界面
-   - 支持配置快速切换
 
 ## 快速开始
 
-### 方式1: 启动后端服务（推荐）
-
-使用 Python 后端服务统一获取播放信息并代理视频流：
-
 ```bash
-# 1. 安装依赖
+cd backend
 pip install -r requirements.txt
-
-# 2. 创建配置文件
 cp config.example.yaml config.yaml
-
-# 3. 编辑 config.yaml，填入 Cookie 和摄像机信息
-
-# 4. 启动后端服务
 python server.py
 ```
 
-**配置文件示例** (`config.yaml`):
+打开 `http://127.0.0.1:5000/` 即可使用前端页面。
 
-```yaml
-# Cookie 配置
-cookie: |
-  __guid=xxx;
-  jia_web_sid=xxx;
+常用命令：
 
-# 摄像机列表
-cameras:
-  - name: "摄像机1"
-    sn: "3601Q0700624502"
-    enabled: true
-    api_version: "v2"  # API 版本: v1 或 v2
-
-  - name: "摄像机2"
-    sn: "360234A00027519"
-    enabled: true
-    api_version: "v2"
-
-# 请求配置
-request_interval: 2  # 每个摄像机请求之间的间隔（秒）
-
-# 输出配置
-output:
-  directory: "./output"
-  format: "json"
-  filename_template: "{name}_{sn}"
-```
-
-**获取 Cookie**:
-1. 打开浏览器（Chrome/Edge/Firefox）
-2. 访问 360智能摄像机网页并登录
-3. 按 F12 打开开发者工具
-4. 切换到 "Network"（网络）标签
-5. 刷新页面，找到任意请求
-6. 查看 "Request Headers" 中的 "Cookie"
-7. 复制完整的 Cookie 值
-
-启动后访问 `http://127.0.0.1:5000/`，页面会：
-
-1. 从后端加载摄像机列表
-2. 调用 `/api/play-info?sn=...` 获取播放信息和密钥
-3. 使用 `/api/stream/<sn>` 代理后的流地址进行播放
-4. 如需批量落盘，可调用 `POST /api/play-info/sync` 或继续运行 `python get_play_info.py`
-
-### 方式2: 使用视频流解密工具
-
-也可以继续手动粘贴 JSON 到 [`web/index.html`](web/index.html) 做调试，但推荐直接通过后端页面流程获取。
-
-### 方式2: 使用解密工具类
-
-```javascript
-const decryptor = new CameraDecryptor();
-
-// 从API响应提取播放信息
-const apiResponse = {
-    "errorCode": 0,
-    "playKey": "xxxxxxxxxxx",
-    "relayStream": "xxxxxxxxxxx",
-    "flashUrl": "xxxxxxxxxxxxxxxxxxx.flv",
-    // ... 其他字段
-};
-
-const info = decryptor.extractPlayInfo(apiResponse);
-
-// 创建播放器
-const container = document.getElementById('video-container');
-const player = decryptor.createPlayer(info.videoUrl, info.playKey, container);
-
-// 播放
-player.play();
-```
-
-### 方式3: 使用修复版解密工具
-
-```javascript
-const decryptor = new CameraDecryptorFixed();
-
-// 从API响应提取播放信息（包含多种配置）
-const info = decryptor.extractPlayInfo(apiResponse);
-
-// 选择一个配置创建播放器
-const config = info.configs[0]; // 使用第一种配置
-const player = decryptor.createPlayer(info.videoUrl, config, container);
-
-// 播放
-player.play();
-```
-
-## Python API 请求工具
-
-### 文件说明
-
-| 文件 | 说明 |
-|------|------|
-| `get_play_info.py` | 配置文件批量获取工具 |
-| `server.py` | 后端 HTTP 服务，负责播放信息接口和视频流代理 |
-| `camera_api_cli.py` | 命令行工具 |
-| `config.example.yaml` | 配置文件模板 |
-| `config.yaml` | 实际配置文件（需自行创建） |
-| `requirements.txt` | Python 依赖列表 |
-
-### 使用方法
-
-**批量获取**（推荐）:
 ```bash
+cd backend
+python server.py
 python get_play_info.py
-```
-
-**单个获取**:
-```bash
 python camera_api_cli.py --sn 3601Q0700624502 --cookie-file cookies.txt
 ```
 
-### 输出文件
+## 目录入口
 
-每个摄像机的播放信息会保存为独立的 JSON 文件：
+- 后端说明: [docs/backend-api.md](docs/backend-api.md)
+- 项目结构: [docs/PROJECT_STRUCTURE.md](docs/PROJECT_STRUCTURE.md)
+- 解密分析: [docs/decryption-analysis.md](docs/decryption-analysis.md)
 
-```json
-{
-  "errorCode": 0,
-  "playKey": "解密密钥",
-  "relay": ["中继服务器地址"],
-  "relayId": "中继ID",
-  "relaySig": "中继签名",
-  "relayStream": "中继流标识",
-  "flashUrl": "视频流完整URL",
-  "errorMsg": "成功",
-  "data": {},
-  "camera_name": "摄像机名称",
-  "camera_sn": "摄像机SN号"
-}
-```
+## 核心路径
 
-### 常见问题
-
-**Q: 请求返回 401 或 403 错误？**
-A: Cookie 可能已过期或不正确。请重新从浏览器获取最新的 Cookie。
-
-**Q: 如何获取摄像机 SN 号？**
-A: SN 号通常在以下位置：
-1. 摄像机设备标签上
-2. 360智能摄像机 APP 中
-3. 图片 URL 中
-
-**Q: v1 和 v2 接口有什么区别？**
-A: v2 接口是新版本，支持更多功能。大多数摄像机建议使用 v2 接口。
-
-## 加密机制分析
-
-### 视频流获取流程
-
-1. 后端调用 360 API 获取播放信息（`playKey`、`flashUrl` 等）
-2. 后端将 `flashUrl` 改写为同源的 `/api/stream/<sn>` 代理地址
-3. 前端播放器使用 `playKey` 和后端代理流地址完成播放
-
-### 关键参数
-
-| 参数        | 类型   | 说明                       |
-| ----------- | ------ | -------------------------- |
-| playKey     | string | 解密密钥（64字符十六进制） |
-| relayStream | string | 中继流标识                 |
-| flashUrl    | string | 视频流地址                 |
-| keyType     | number | 解密算法类型               |
-| relay       | array  | 中继服务器列表             |
-| relayId     | string | 中继ID                     |
-| relaySig    | string | 中继签名                   |
-
-### 解密流程
-
-```
-视频流数据 → Downloader下载 → Decoder接收
-                                    ↓
-                            使用playKey解密
-                                    ↓
-                            解码为YUV/PCM数据
-                                    ↓
-                            Renderer渲染显示
-```
-
-## 解密配置说明
-
-[`decrypt_fix.js`](decrypt_fix.js) 提供了4种解密配置用于解决画面颜色异常问题：
-
-| 配置  | keyType | key     | keyForKey | 说明                      |
-| ----- | ------- | ------- | --------- | ------------------------- |
-| 配置1 | 0       | playKey | null      | 默认解密方式              |
-| 配置2 | 1       | playKey | null      | 解密方式1                 |
-| 配置3 | 0       | null    | null      | 不使用密钥（测试用）      |
-| 配置4 | 0       | playKey | relaySig  | 使用中继签名作为keyForKey |
-
-## 注意事项
-
-### 跨域问题
-
-由于浏览器的CORS（跨域资源共享）策略，直接从本地文件访问API可能会被阻止。
-
-**解决方案**:
-
-1. 使用本地HTTP服务器运行
-2. 配置服务器允许跨域请求
-3. 使用浏览器扩展禁用CORS（仅用于测试）
-
-### 播放器依赖
-
-需要加载以下资源：
-
-```html
-<!-- 加载 QhwwPlayer 播放器 -->
-<script src="qhwwplayer.js"></script>
-
-<!-- 加载解密工具 -->
-<script src="360_camera_decryptor.js"></script>
-<script src="decrypt_fix.js"></script>
-```
-
-### 浏览器兼容性
-
-需要支持以下特性：
-
-- WebAssembly
-- Web Workers
-- WebGL
-- AudioContext
-- Fetch API
-
-## 安全说明
-
-### 加密目的
-
-360智能摄像机使用加密是为了：
-
-1. 保护用户隐私
-2. 防止未授权访问
-3. 确保视频流安全传输
-
-### 合法使用
-
-本解密工具仅用于：
-
-1. 理解视频流加密机制
-2. 学习和教学目的
-3. 合法授权的设备访问
-
-请勿用于：
+- 后端核心代码: `backend/app/`
+- 后端兼容入口: `backend/server.py`、`backend/get_play_info.py`、`backend/camera_api_cli.py`
+- 前端调试页: `web/index.html`
+- 原始留档资料: `save_web/`
 
 1. 未授权访问他人设备
 2. 侵犯他人隐私
