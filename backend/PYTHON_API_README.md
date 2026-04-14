@@ -1,6 +1,6 @@
 # 360智能摄像机 API 请求工具
 
-用于从 360智能摄像机获取播放信息的 Python 工具。
+用于从 360智能摄像机获取播放信息，并通过后端代理视频流给前端播放的 Python 工具。
 
 ## 功能
 
@@ -9,6 +9,8 @@
 - 支持 Cookie 认证
 - 自动尝试 V1/V2 API 接口
 - 将结果保存到 JSON 文件
+- 提供 Flask HTTP 服务，返回可直接给前端使用的代理流地址
+- 通过后端代理视频流，绕过浏览器直连 360 流地址时的 CORS 限制
 
 ## 安装依赖
 
@@ -26,9 +28,9 @@ pip install requests pyyaml
 
 | 文件 | 说明 |
 |------|------|
-| `camera_api_request.py` | 基础 API 请求类 |
 | `camera_api_cli.py` | 命令行工具 |
 | `get_play_info.py` | 配置文件批量获取工具（推荐） |
+| `server.py` | 后端 HTTP 服务，提供播放信息接口与视频流代理 |
 | `config.example.yaml` | 配置文件模板 |
 | `config.yaml` | 实际配置文件（需自行创建） |
 | `requirements.txt` | Python 依赖列表 |
@@ -92,14 +94,45 @@ python get_play_info.py
 - 获取每个摄像机的播放信息
 - 将结果保存到 `output/` 目录
 
-### 4. 使用 web/ 目录解密播放
+### 4. 启动后端服务
 
-获取到的 JSON 数据可以输入到 `web/index.html` 中进行解密和播放：
+```bash
+python server.py
+```
 
-1. 打开 `web/index.html`
-2. 将 `output/` 目录中的 JSON 文件内容复制到输入框
-3. 点击"解析JSON"按钮
-4. 选择解密配置进行测试
+默认监听 `http://127.0.0.1:5000`。
+
+可用接口：
+
+- `GET /api/cameras`：读取 `config.yaml` 中的摄像机列表
+- `GET /api/play-info?sn=...`：获取播放信息，并将 `flashUrl` 改写为后端代理地址
+- `GET /api/stream/<sn>`：后端代理 360 FLV 视频流
+- `POST /api/play-info/<sn>/save`：获取指定摄像机播放信息并按配置保存到 `output/`
+- `POST /api/play-info/sync`：批量获取所有启用摄像机的播放信息并保存到 `output/`
+
+### 5. 使用 web/ 目录解密播放
+
+启动 `server.py` 后，直接访问：
+
+```text
+http://127.0.0.1:5000/
+```
+
+页面会先调用后端获取播放信息，再使用后端代理流地址进行播放，浏览器无需再直连 360 加密流服务器。
+
+### 6. 批量同步输出文件
+
+除了运行 `python get_play_info.py`，也可以直接调后端接口：
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/play-info/sync
+```
+
+它会复用原 `get_play_info.py` 的配置规则：
+
+- 按 `config.yaml` 中的摄像机列表批量获取
+- 遵守 `request_interval`
+- 按 `output.directory` 和 `output.filename_template` 写入 JSON 文件
 
 ## 配置文件说明
 

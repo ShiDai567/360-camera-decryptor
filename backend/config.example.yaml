@@ -22,6 +22,14 @@ cameras:
 # 每个摄像机请求之间的间隔（秒）
 request_interval: 3
 
+# 后端服务配置
+server:
+  # 播放信息缓存秒数，避免前端获取到的密钥和代理流地址错位
+  play_info_cache_seconds: 30
+  # 部署在反向代理后面时，显式指定前端可访问的后端公网地址
+  # 例如: "https://you.domain.com"
+  public_base_url: ""
+
 # 输出配置
 output:
   # 输出目录

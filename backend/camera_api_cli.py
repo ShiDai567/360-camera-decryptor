@@ -17,7 +17,7 @@ import requests
 class CameraAPIRequest:
     """360智能摄像机 API 请求类"""
 
-    def __init__(self):
+    def __init__(self, verbose: bool = True):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -26,12 +26,17 @@ class CameraAPIRequest:
             'Referer': 'https://my.jia.360.cn/',
         })
         self._has_cookies = False
+        self.verbose = verbose
+
+    def _log(self, message: str) -> None:
+        if self.verbose:
+            print(message)
 
     def set_cookies(self, cookies: Dict[str, str]) -> None:
         """设置 Cookie"""
         self.session.cookies.update(cookies)
         self._has_cookies = True
-        print(f"✓ 已设置 {len(cookies)} 个 Cookie")
+        self._log(f"✓ 已设置 {len(cookies)} 个 Cookie")
 
     def set_cookie_from_string(self, cookie_string: str) -> None:
         """从 Cookie 字符串设置 Cookie"""
@@ -44,7 +49,7 @@ class CameraAPIRequest:
         if cookies:
             self.set_cookies(cookies)
         else:
-            print("⚠ 未找到有效的 Cookie")
+            self._log("⚠ 未找到有效的 Cookie")
 
     def load_cookies_from_file(self, file_path: str) -> None:
         """
@@ -55,7 +60,7 @@ class CameraAPIRequest:
         2. 文本格式: key1=value1; key2=value2
         """
         if not os.path.exists(file_path):
-            print(f"✗ Cookie 文件不存在: {file_path}")
+            self._log(f"✗ Cookie 文件不存在: {file_path}")
             return
 
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -86,34 +91,34 @@ class CameraAPIRequest:
                 time_str = match.group(2)
                 try:
                     url_date = datetime.strptime(f"{date_str}{time_str}", "%Y%m%d%H%M%S")
-                    print(f"⚠ URL 中的签名日期: {url_date}")
-                    print("⚠ 注意: 如果签名已过期，需要重新获取有效的 URL")
+                    self._log(f"⚠ URL 中的签名日期: {url_date}")
+                    self._log("⚠ 注意: 如果签名已过期，需要重新获取有效的 URL")
                 except:
                     pass
 
         # 检查是否设置了 Cookie
         if not self._has_cookies:
-            print("⚠ 警告: 未设置 Cookie，某些请求可能需要认证")
-            print("  提示: 使用 --cookie 或 --cookie-file 参数设置 Cookie")
+            self._log("⚠ 警告: 未设置 Cookie，某些请求可能需要认证")
+            self._log("  提示: 使用 --cookie 或 --cookie-file 参数设置 Cookie")
 
         try:
-            print(f"\n正在请求: {image_url[:80]}...")
+            self._log(f"\n正在请求: {image_url[:80]}...")
             response = self.session.get(image_url, timeout=30, allow_redirects=True)
 
-            print(f"状态码: {response.status_code}")
-            print(f"Content-Type: {response.headers.get('Content-Type')}")
+            self._log(f"状态码: {response.status_code}")
+            self._log(f"Content-Type: {response.headers.get('Content-Type')}")
 
             # 处理 403 错误
             if response.status_code == 403:
-                print("✗ 403 Forbidden - 访问被拒绝")
-                print("\n可能的原因:")
-                print("  1. URL 中的 AWS 签名已过期")
-                print("  2. 需要正确的 Cookie 认证")
-                print("  3. IP 地址被限制")
-                print("\n建议:")
-                print("  - 重新从浏览器获取有效的 URL")
-                print("  - 使用 --cookie 或 --cookie-file 参数设置正确的 Cookie")
-                print("  - 尝试使用 --sn 参数直接调用 API")
+                self._log("✗ 403 Forbidden - 访问被拒绝")
+                self._log("\n可能的原因:")
+                self._log("  1. URL 中的 AWS 签名已过期")
+                self._log("  2. 需要正确的 Cookie 认证")
+                self._log("  3. IP 地址被限制")
+                self._log("\n建议:")
+                self._log("  - 重新从浏览器获取有效的 URL")
+                self._log("  - 使用 --cookie 或 --cookie-file 参数设置正确的 Cookie")
+                self._log("  - 尝试使用 --sn 参数直接调用 API")
                 return {
                     'success': False,
                     'error': '403 Forbidden - 访问被拒绝',
@@ -128,24 +133,24 @@ class CameraAPIRequest:
 
             try:
                 json_data = response.json()
-                print(f"✓ 成功获取 JSON 数据")
+                self._log("✓ 成功获取 JSON 数据")
 
                 # 保存到文件
                 if save_to_file:
                     with open(save_to_file, 'w', encoding='utf-8') as f:
                         json.dump(json_data, f, indent=2, ensure_ascii=False)
-                    print(f"✓ 已保存到文件: {save_to_file}")
+                    self._log(f"✓ 已保存到文件: {save_to_file}")
 
                 return json_data
             except json.JSONDecodeError:
                 content_type = response.headers.get('Content-Type', '')
-                print(f"✗ 响应不是 JSON 格式")
-                print(f"   Content-Type: {content_type}")
+                self._log("✗ 响应不是 JSON 格式")
+                self._log(f"   Content-Type: {content_type}")
 
                 if 'image' in content_type:
-                    print("\n提示: 这是一个图片 URL，可能需要:")
-                    print("  1. 使用 --sn 参数直接调用 API")
-                    print("  2. 从浏览器开发者工具获取实际的 API 请求")
+                    self._log("\n提示: 这是一个图片 URL，可能需要:")
+                    self._log("  1. 使用 --sn 参数直接调用 API")
+                    self._log("  2. 从浏览器开发者工具获取实际的 API 请求")
 
                 return {
                     'success': False,
@@ -155,7 +160,7 @@ class CameraAPIRequest:
                 }
 
         except requests.exceptions.RequestException as e:
-            print(f"✗ 请求失败: {e}")
+            self._log(f"✗ 请求失败: {e}")
             return {'success': False, 'error': str(e)}
 
     def get_play_info_from_api(self, sn: str, is_v2: bool = False, save_to_file: Optional[str] = None) -> Dict[str, Any]:
@@ -174,25 +179,25 @@ class CameraAPIRequest:
 
         # 检查是否设置了 Cookie
         if not self._has_cookies:
-            print("⚠ 警告: 未设置 Cookie，API 请求可能失败")
-            print("  提示: 使用 --cookie 或 --cookie-file 参数设置 Cookie")
+            self._log("⚠ 警告: 未设置 Cookie，API 请求可能失败")
+            self._log("  提示: 使用 --cookie 或 --cookie-file 参数设置 Cookie")
 
         try:
             url = f"{base_url}{api_path}"
-            print(f"\n正在请求 API: {url}")
-            print(f"SN: {sn}")
-            print(f"接口: {'V2' if is_v2 else 'V1'}")
+            self._log(f"\n正在请求 API: {url}")
+            self._log(f"SN: {sn}")
+            self._log(f"接口: {'V2' if is_v2 else 'V1'}")
 
             response = self.session.get(url, params=params, timeout=30)
 
-            print(f"状态码: {response.status_code}")
+            self._log(f"状态码: {response.status_code}")
 
             # 处理 401/403 错误
             if response.status_code in [401, 403]:
-                print("✗ 认证失败 - 需要正确的 Cookie")
-                print("\n建议:")
-                print("  1. 从浏览器开发者工具获取 Cookie")
-                print("  2. 使用 --cookie 或 --cookie-file 参数设置 Cookie")
+                self._log("✗ 认证失败 - 需要正确的 Cookie")
+                self._log("\n建议:")
+                self._log("  1. 从浏览器开发者工具获取 Cookie")
+                self._log("  2. 使用 --cookie 或 --cookie-file 参数设置 Cookie")
                 return {
                     'success': False,
                     'error': f'{response.status_code} 认证失败',
@@ -205,17 +210,17 @@ class CameraAPIRequest:
             response.raise_for_status()
 
             json_data = response.json()
-            print(f"✓ 成功获取 JSON 数据")
+            self._log("✓ 成功获取 JSON 数据")
 
             if save_to_file:
                 with open(save_to_file, 'w', encoding='utf-8') as f:
                     json.dump(json_data, f, indent=2, ensure_ascii=False)
-                print(f"✓ 已保存到文件: {save_to_file}")
+                self._log(f"✓ 已保存到文件: {save_to_file}")
 
             return json_data
 
         except requests.exceptions.RequestException as e:
-            print(f"✗ API 请求失败: {e}")
+            self._log(f"✗ API 请求失败: {e}")
             return {'success': False, 'error': str(e)}
 
 

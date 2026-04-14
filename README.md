@@ -2,7 +2,7 @@
 
 ## 项目说明
 
-本项目提供了360智能摄像机视频流加密机制的逆向分析和解密工具，可以用于学习和研究目的。
+本项目提供了360智能摄像机视频流加密机制的逆向分析和解密工具，可以用于学习和研究目的。当前版本已将原先“前端直连 360 流地址”的模式调整为“后端统一获取播放信息并代理视频流”，用于绕过浏览器跨域限制。
 ![](./preview.jpg)
 
 ## ⚠️ 重要提示
@@ -54,9 +54,9 @@
 
 ## 快速开始
 
-### 方式1: 使用 Python API 请求工具（推荐）
+### 方式1: 启动后端服务（推荐）
 
-使用 Python 工具批量获取摄像机播放信息：
+使用 Python 后端服务统一获取播放信息并代理视频流：
 
 ```bash
 # 1. 安装依赖
@@ -67,8 +67,8 @@ cp config.example.yaml config.yaml
 
 # 3. 编辑 config.yaml，填入 Cookie 和摄像机信息
 
-# 4. 运行脚本
-python get_play_info.py
+# 4. 启动后端服务
+python server.py
 ```
 
 **配置文件示例** (`config.yaml`):
@@ -110,9 +110,16 @@ output:
 6. 查看 "Request Headers" 中的 "Cookie"
 7. 复制完整的 Cookie 值
 
+启动后访问 `http://127.0.0.1:5000/`，页面会：
+
+1. 从后端加载摄像机列表
+2. 调用 `/api/play-info?sn=...` 获取播放信息和密钥
+3. 使用 `/api/stream/<sn>` 代理后的流地址进行播放
+4. 如需批量落盘，可调用 `POST /api/play-info/sync` 或继续运行 `python get_play_info.py`
+
 ### 方式2: 使用视频流解密工具
 
-获取播放信息后，打开 [`web/index.html`](web/index.html)，输入JSON数据，点击"解析JSON"按钮，然后选择解密配置进行测试。
+也可以继续手动粘贴 JSON 到 [`web/index.html`](web/index.html) 做调试，但推荐直接通过后端页面流程获取。
 
 ### 方式2: 使用解密工具类
 
@@ -161,6 +168,7 @@ player.play();
 | 文件 | 说明 |
 |------|------|
 | `get_play_info.py` | 配置文件批量获取工具 |
+| `server.py` | 后端 HTTP 服务，负责播放信息接口和视频流代理 |
 | `camera_api_cli.py` | 命令行工具 |
 | `config.example.yaml` | 配置文件模板 |
 | `config.yaml` | 实际配置文件（需自行创建） |
@@ -216,9 +224,9 @@ A: v2 接口是新版本，支持更多功能。大多数摄像机建议使用 v
 
 ### 视频流获取流程
 
-1. 使用 Python 工具获取播放信息（`playKey`、`flashUrl` 等）
-2. 将 JSON 数据输入到 [`web/index.html`](web/index.html)
-3. 播放器使用 `playKey` 解密并播放视频流
+1. 后端调用 360 API 获取播放信息（`playKey`、`flashUrl` 等）
+2. 后端将 `flashUrl` 改写为同源的 `/api/stream/<sn>` 代理地址
+3. 前端播放器使用 `playKey` 和后端代理流地址完成播放
 
 ### 关键参数
 

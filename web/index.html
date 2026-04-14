@@ -99,6 +99,24 @@
             border-color: #667eea;
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
         }
+
+        .text-input,
+        .camera-select {
+            width: 100%;
+            padding: 14px 15px;
+            border: 2px solid #e2e8f0;
+            border-radius: 10px;
+            font-size: 14px;
+            transition: all 0.3s ease;
+            background: white;
+        }
+
+        .text-input:focus,
+        .camera-select:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
         
         .button-group {
             display: flex;
@@ -429,11 +447,25 @@
             <!-- JSON输入区域 -->
             <div class="input-section">
                 <div class="input-header">
-                    <h2>📝 输入视频流信息</h2>
+                    <h2>📝 后端播放信息获取</h2>
                 </div>
                 <div class="input-group">
-                    <label class="input-label">JSON数据或API返回值</label>
-                    <textarea id="json-input" class="json-input" placeholder='请输入API返回的JSON数据，例如：
+                    <label class="input-label">后端服务地址</label>
+                    <input id="backend-base-url" class="text-input" placeholder="例如: http://127.0.0.1:5000">
+                </div>
+                <div class="input-group">
+                    <label class="input-label">摄像机列表</label>
+                    <select id="camera-select" class="camera-select" onchange="syncCameraSelection()">
+                        <option value="">请先加载后端摄像机列表</option>
+                    </select>
+                </div>
+                <div class="input-group">
+                    <label class="input-label">摄像机 SN</label>
+                    <input id="camera-sn-input" class="text-input" placeholder="请输入摄像机 SN，例如 3601Q0700624502">
+                </div>
+                <div class="input-group">
+                    <label class="input-label">手动 JSON 调试输入</label>
+                    <textarea id="json-input" class="json-input" placeholder='可直接粘贴 API 返回 JSON，或先点击“从后端获取播放信息”自动填充，例如：
 {
     "errorCode": 0,
     "playKey": "解密密钥",
@@ -446,6 +478,8 @@
 }'></textarea>
                 </div>
                 <div class="button-group">
+                    <button onclick="loadCameraList()">📷 加载摄像机列表</button>
+                    <button onclick="fetchPlayInfo()">🌐 从后端获取播放信息</button>
                     <button onclick="parseJson()">🔍 解析JSON</button>
                     <button class="secondary" onclick="clearInput()">🗑️ 清空输入</button>
                     <button class="secondary" onclick="loadSampleData()">📋 加载示例数据</button>
@@ -561,11 +595,7 @@
         // 检测播放器是否加载成功
         function checkPlayerLoaded() {
             if (typeof QhwwPlayer === 'undefined') {
-                log('QhwwPlayer 播放器未加载，请确保：', 'error');
-                log('1. 文件路径正确：我的360智能摄像机_files/878ef34244c2b1d0.js.下载', 'error');
-                log('2. 使用HTTP服务器运行（不要直接双击HTML文件）', 'error');
-                log('3. 启动HTTP服务器命令：python -m http.server 8000', 'error');
-                log('4. 然后访问：http://localhost:8000/test_configs.html', 'error');
+                log('QhwwPlayer 播放器未加载，请确认页面由后端服务启动且 qhwwplayer.js 可访问', 'error');
                 return false;
             }
             log('QhwwPlayer 播放器加载成功', 'success');
@@ -579,6 +609,21 @@
         let apiResponse = null;
         let currentPlayer = null;
         let currentConfigId = null;
+
+        function getDefaultBackendBaseUrl() {
+            if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+                return window.location.origin;
+            }
+            return 'http://127.0.0.1:5000';
+        }
+
+        function getBackendBaseUrl() {
+            return document.getElementById('backend-base-url').value.trim().replace(/\/$/, '');
+        }
+
+        function buildApiUrl(path) {
+            return `${getBackendBaseUrl()}${path}`;
+        }
         
         // ==================== 日志函数 ====================
         function log(message, type = 'info') {
@@ -592,6 +637,74 @@
             console.log(`[${type.toUpperCase()}]`, message);
         }
         
+        function syncCameraSelection() {
+            const select = document.getElementById('camera-select');
+            const snInput = document.getElementById('camera-sn-input');
+            if (select.value) {
+                snInput.value = select.value;
+            }
+        }
+
+        async function loadCameraList() {
+            const select = document.getElementById('camera-select');
+            select.innerHTML = '<option value="">摄像机列表加载中...</option>';
+
+            try {
+                const response = await fetch(buildApiUrl('/api/cameras'));
+                const result = await response.json();
+
+                if (!response.ok || result.error) {
+                    throw new Error(result.error || '加载摄像机列表失败');
+                }
+
+                const cameras = result.cameras || [];
+                if (!cameras.length) {
+                    select.innerHTML = '<option value="">配置中没有可用摄像机</option>';
+                    log('后端已连接，但配置中没有可用摄像机', 'warning');
+                    return;
+                }
+
+                select.innerHTML = '<option value="">请选择摄像机</option>';
+                cameras.forEach((camera) => {
+                    const option = document.createElement('option');
+                    option.value = camera.sn;
+                    option.textContent = `${camera.name || camera.sn} (${camera.api_version || 'v2'})`;
+                    select.appendChild(option);
+                });
+
+                log(`已加载 ${cameras.length} 个摄像机`, 'success');
+            } catch (error) {
+                select.innerHTML = '<option value="">加载失败</option>';
+                log(`加载摄像机列表失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function fetchPlayInfo() {
+            const sn = document.getElementById('camera-sn-input').value.trim();
+            if (!sn) {
+                log('请先输入摄像机 SN', 'error');
+                alert('请先输入摄像机 SN');
+                return;
+            }
+
+            log(`正在从后端获取播放信息: ${sn}`, 'info');
+
+            try {
+                const response = await fetch(buildApiUrl(`/api/play-info?sn=${encodeURIComponent(sn)}`));
+                const result = await response.json();
+
+                if (!response.ok || result.errorCode !== 0) {
+                    throw new Error(result.errorMsg || result.error || '获取播放信息失败');
+                }
+
+                document.getElementById('json-input').value = JSON.stringify(result, null, 4);
+                applyApiResponse(result, '后端接口');
+            } catch (error) {
+                log(`获取播放信息失败: ${error.message}`, 'error');
+                alert(`获取播放信息失败: ${error.message}`);
+            }
+        }
+
         // ==================== JSON解析 ====================
         function parseJson() {
             const jsonInput = document.getElementById('json-input').value.trim();
@@ -603,32 +716,31 @@
             }
             
             try {
-                apiResponse = JSON.parse(jsonInput);
-                log('JSON解析成功', 'success');
-                
-                // 检查必要字段
-                if (apiResponse.errorCode !== undefined) {
-                    if (apiResponse.errorCode !== 0) {
-                        log(`API返回错误: ${apiResponse.errorMsg || '未知错误'}`, 'error');
-                        alert(`API返回错误: ${apiResponse.errorMsg || '未知错误'}`);
-                    } else {
-                        log('API返回成功', 'success');
-                    }
-                }
-                
-                // 显示视频流信息
-                displayVideoInfo();
-                
-                // 显示配置区域
-                document.getElementById('config-section').classList.add('visible');
-                document.getElementById('player-section').classList.add('visible');
-                
-                log('视频流信息已加载，请选择解密配置进行测试', 'info');
-                
+                const parsed = JSON.parse(jsonInput);
+                applyApiResponse(parsed, '手动 JSON');
             } catch (e) {
                 log(`JSON解析失败: ${e.message}`, 'error');
                 alert(`JSON解析失败: ${e.message}`);
             }
+        }
+
+        function applyApiResponse(payload, sourceLabel) {
+            apiResponse = payload;
+            log(`${sourceLabel} 数据解析成功`, 'success');
+
+            if (apiResponse.errorCode !== undefined) {
+                if (apiResponse.errorCode !== 0) {
+                    log(`API返回错误: ${apiResponse.errorMsg || '未知错误'}`, 'error');
+                    alert(`API返回错误: ${apiResponse.errorMsg || '未知错误'}`);
+                } else {
+                    log('API返回成功', 'success');
+                }
+            }
+
+            displayVideoInfo();
+            document.getElementById('config-section').classList.add('visible');
+            document.getElementById('player-section').classList.add('visible');
+            log('视频流信息已加载，请选择解密配置进行测试', 'info');
         }
         
         // ==================== 显示视频流信息 ====================
@@ -636,14 +748,14 @@
             if (!apiResponse) return;
             
             // 更新信息显示
-            document.getElementById('info-flashUrl').textContent = apiResponse.flashUrl || '-';
+            document.getElementById('info-flashUrl').textContent = apiResponse.flashUrl || apiResponse.sourceFlashUrl || '-';
             document.getElementById('info-relayStream').textContent = apiResponse.relayStream || '-';
             document.getElementById('info-playKey').textContent = apiResponse.playKey || '-';
             document.getElementById('info-keyLength').textContent = apiResponse.playKey ? `${apiResponse.playKey.length} 字符` : '-';
             document.getElementById('info-relay').textContent = apiResponse.relay ? apiResponse.relay.join(', ') : '-';
             document.getElementById('info-relayId').textContent = apiResponse.relayId || '-';
             document.getElementById('info-relaySig').textContent = apiResponse.relaySig || '-';
-            document.getElementById('info-errorMsg').textContent = apiResponse.errorMsg || '-';
+            document.getElementById('info-errorMsg').textContent = apiResponse.backendDecryptNote || apiResponse.errorMsg || '-';
             
             // 显示视频流信息区域
             document.getElementById('video-stream-section').classList.add('visible');
@@ -767,10 +879,12 @@
             const container = document.getElementById('video-container');
             
             try {
+                const streamUrl = apiResponse.flashUrl || apiResponse.sourceFlashUrl;
+
                 // 创建播放器
                 const playerConfig = {
                     container: container,
-                    src: apiResponse.flashUrl,
+                    src: streamUrl,
                     key: config.key,
                     keyType: config.keyType,
                     isLive: true,
@@ -842,14 +956,17 @@
         
         // ==================== 初始化 ====================
         document.addEventListener('DOMContentLoaded', function() {
+            document.getElementById('backend-base-url').value = getDefaultBackendBaseUrl();
             log('=== 360智能摄像机视频流解密工具 ===', 'success');
             log('系统初始化完成', 'success');
-            log('请输入API返回的JSON数据，然后点击"解析JSON"按钮', 'info');
+            log('页面已切换为后端驱动模式，建议先加载摄像机列表，再获取播放信息', 'info');
             
             // 延迟检查播放器加载状态
             setTimeout(function() {
                 checkPlayerLoaded();
             }, 1000);
+
+            loadCameraList();
             
             log('');
             updateStatus('等待输入');
