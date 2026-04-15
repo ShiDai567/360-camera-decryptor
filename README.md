@@ -14,7 +14,7 @@
 ```bash
 cd backend
 pip install -r requirements.txt
-cp config.example.yaml config.yaml
+cp backend/configs/config.example.yaml backend/configs/config.yaml
 python server.py
 ```
 

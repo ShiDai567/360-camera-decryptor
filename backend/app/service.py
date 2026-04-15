@@ -34,7 +34,7 @@ class CameraBackendService:
     """封装配置读取、播放信息获取、批量保存与缓存。"""
 
     def __init__(self, config_path: Optional[str] = None):
-        self.config_path = Path(config_path or BACKEND_DIR / "config.yaml")
+        self.config_path = Path(config_path or BACKEND_DIR / "configs" / "config.yaml")
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
 

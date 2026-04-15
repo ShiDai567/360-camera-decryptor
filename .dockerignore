@@ -1,0 +1,16 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.db
+.cache
+backend/.cache
+node_modules
+docker/
+README.md
+docs/
+解密分析报告.md
+preview.jpg

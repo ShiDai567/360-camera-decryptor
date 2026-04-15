@@ -10,8 +10,9 @@
 │   │   ├── cli.py            # CLI 入口逻辑
 │   │   └── service.py        # Flask 服务与批量同步逻辑
 │   ├── server.py             # Flask 服务兼容入口
-│   ├── config.example.yaml   # 配置模板
-│   ├── config.yaml           # 本地配置
+│   ├── configs/              # 配置文件目录
+│   │   ├── config.example.yaml   # 配置模板
+│   │   ├── config.yaml           # 本地配置
 ├── frontend/                 # 前端调试页与播放器资源
 ├── docs/                     # 文档
 │   ├── PROJECT_STRUCTURE.md
