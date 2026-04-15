@@ -849,6 +849,39 @@
                     </div>
                 </div>
             </div>
+
+            <div class="config-section panel" id="go2rtc-section">
+                <div class="section-header">
+                    <h2>🔁 go2rtc 接入</h2>
+                    <span class="section-badge">FFmpeg Source</span>
+                </div>
+                <div class="input-group">
+                    <label class="input-label" style="color: var(--muted);">推荐 `go2rtc.yaml` 片段（优先服务端解密）</label>
+                    <textarea id="go2rtc-yaml" class="json-input" readonly placeholder="先从后端获取播放信息，再生成 go2rtc 配置"></textarea>
+                </div>
+                <div class="input-group">
+                    <label class="input-label" style="color: var(--muted);">go2rtc 输出模式</label>
+                    <select id="go2rtc-mode" class="camera-select">
+                        <option value="decrypted">服务端解密 MPEG-TS</option>
+                        <option value="raw">原始 FLV 代理</option>
+                    </select>
+                </div>
+                <div class="info-grid" style="margin-bottom: 18px;">
+                    <div class="info-item">
+                        <div class="info-label">流名称</div>
+                        <div class="info-value" id="go2rtc-stream-name">-</div>
+                    </div>
+                    <div class="info-item">
+                        <div class="info-label">FFmpeg Source</div>
+                        <div class="info-value" id="go2rtc-source-url">-</div>
+                    </div>
+                </div>
+                <div class="button-group">
+                    <button onclick="fetchGo2rtcConfig()">🔁 生成 go2rtc 配置</button>
+                    <button class="secondary" onclick="copyGo2rtcYaml()">📋 复制 YAML</button>
+                </div>
+                <p class="input-note" style="color: var(--muted);">新后端会优先生成服务端解密后的 MPEG-TS 拉流地址；如果检测到你还在运行旧后端，页面会自动回退到原始 FLV 代理模式。</p>
+            </div>
             
             <!-- 解密配置 -->
             <div class="config-section panel" id="config-section">
@@ -934,6 +967,7 @@
         let apiResponse = null;
         let currentPlayer = null;
         let currentConfigId = null;
+        let go2rtcConfig = null;
 
         function getDefaultBackendBaseUrl() {
             if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
@@ -948,6 +982,56 @@
 
         function buildApiUrl(path) {
             return `${getBackendBaseUrl()}${path}`;
+        }
+
+        function slugifyGo2rtcName(name, sn = '') {
+            const lowerName = (name || '').toLowerCase();
+            const normalized = lowerName
+                .replace(/[^a-z0-9]+/g, '_')
+                .replace(/^_+|_+$/g, '');
+            const snSuffix = (sn || 'unknown').toLowerCase().slice(-6);
+            return normalized ? `${normalized}_${snSuffix}` : `camera_${snSuffix}`;
+        }
+
+        function buildLocalGo2rtcConfig(sn) {
+            const cameraName = (apiResponse && (apiResponse.camera_name || apiResponse.name)) || '';
+            const streamName = slugifyGo2rtcName(cameraName, sn);
+            const mode = document.getElementById('go2rtc-mode').value || 'decrypted';
+            const configId = currentConfigId !== null ? currentConfigId : 0;
+            const isDecryptedMode = mode === 'decrypted';
+            const sourceUrl = buildApiUrl(isDecryptedMode ? `/api/decrypted-stream/${configId}/${encodeURIComponent(sn)}` : `/api/stream/${encodeURIComponent(sn)}`);
+            const ffmpegSource = `ffmpeg:${sourceUrl}#input=${isDecryptedMode ? 'mpegts' : 'flv'}`;
+            const yaml = `streams:\n  ${streamName}:\n  - ${ffmpegSource}\n`;
+
+            return {
+                count: 1,
+                mode,
+                note: isDecryptedMode
+                    ? '后端未提供 /api/go2rtc/config，当前为前端本地生成的服务端解密配置；请确认后端已升级且支持 /api/decrypted-stream/<sn>。'
+                    : '后端未提供 /api/go2rtc/config，当前为前端本地生成的原始流代理配置。',
+                public_base_url: getBackendBaseUrl(),
+                streams: [
+                    {
+                        name: cameraName,
+                        sn: sn,
+                        stream_name: streamName,
+                        source_url: sourceUrl,
+                        ffmpeg_source: ffmpegSource,
+                        mode
+                    }
+                ],
+                yaml
+            };
+        }
+
+        function applyGo2rtcConfig(result, sourceLabel = '后端接口') {
+            go2rtcConfig = result;
+            const stream = (result.streams || [])[0] || {};
+            document.getElementById('go2rtc-yaml').value = result.yaml || '';
+            document.getElementById('go2rtc-stream-name').textContent = stream.stream_name || '-';
+            document.getElementById('go2rtc-source-url').textContent = stream.ffmpeg_source || '-';
+            document.getElementById('go2rtc-section').classList.add('visible');
+            log(`go2rtc 配置已生成 (${sourceLabel})`, 'success');
         }
         
         // ==================== 日志函数 ====================
@@ -1024,6 +1108,7 @@
 
                 document.getElementById('json-input').value = JSON.stringify(result, null, 4);
                 applyApiResponse(result, '后端接口');
+                await fetchGo2rtcConfig(sn);
             } catch (error) {
                 log(`获取播放信息失败: ${error.message}`, 'error');
                 alert(`获取播放信息失败: ${error.message}`);
@@ -1063,6 +1148,7 @@
             }
 
             displayVideoInfo();
+            document.getElementById('go2rtc-section').classList.add('visible');
             document.getElementById('config-section').classList.add('visible');
             document.getElementById('player-section').classList.add('visible');
             log('视频流信息已加载，请选择解密配置进行测试', 'info');
@@ -1086,6 +1172,55 @@
             document.getElementById('video-stream-section').classList.add('visible');
             
             log('视频流信息已显示', 'success');
+        }
+
+        function getCurrentCameraSn() {
+            return (apiResponse && (apiResponse.camera_sn || apiResponse.sn)) || document.getElementById('camera-sn-input').value.trim();
+        }
+
+        async function fetchGo2rtcConfig(explicitSn = '') {
+            const sn = explicitSn || getCurrentCameraSn();
+            const mode = document.getElementById('go2rtc-mode').value || 'decrypted';
+            const configId = currentConfigId !== null ? currentConfigId : 0;
+            if (!sn) {
+                log('请先输入摄像机 SN，再生成 go2rtc 配置', 'error');
+                alert('请先输入摄像机 SN');
+                return;
+            }
+
+            try {
+                const response = await fetch(buildApiUrl(`/api/go2rtc/config?sn=${encodeURIComponent(sn)}&mode=${encodeURIComponent(mode)}&config_id=${encodeURIComponent(configId)}`));
+                const result = await response.json();
+                if (!response.ok || result.error) {
+                    const errorMessage = result.error || '生成 go2rtc 配置失败';
+                    const shouldFallback = response.status === 404 || errorMessage.includes('文件不存在: api/go2rtc/config');
+                    if (shouldFallback) {
+                        applyGo2rtcConfig(buildLocalGo2rtcConfig(sn), '前端兜底');
+                        log('检测到后端仍是旧版本，已自动切换为前端生成 go2rtc 配置', 'warning');
+                        return;
+                    }
+                    throw new Error(errorMessage);
+                }
+
+                applyGo2rtcConfig(result, '后端接口');
+            } catch (error) {
+                log(`生成 go2rtc 配置失败: ${error.message}`, 'error');
+            }
+        }
+
+        async function copyGo2rtcYaml() {
+            const yamlText = document.getElementById('go2rtc-yaml').value.trim();
+            if (!yamlText) {
+                log('当前没有可复制的 go2rtc 配置', 'warning');
+                return;
+            }
+
+            try {
+                await navigator.clipboard.writeText(yamlText);
+                log('go2rtc YAML 已复制到剪贴板', 'success');
+            } catch (error) {
+                log(`复制失败: ${error.message}`, 'error');
+            }
         }
         
         // ==================== 清空输入 ====================

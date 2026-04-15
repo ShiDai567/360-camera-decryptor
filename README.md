@@ -27,6 +27,28 @@ cd backend
 python server.py
 ```
 
+## 接入 go2rtc
+
+后端现在可以直接生成 `go2rtc` 可用的配置片段：
+
+```bash
+curl "http://127.0.0.1:5000/api/go2rtc/config?sn=3601Q0700624502&mode=decrypted&format=yaml"
+```
+
+返回结果可以直接粘进你的 `go2rtc.yaml`，形态类似：
+
+```yaml
+streams:
+  one_624502:
+    - ffmpeg:http://127.0.0.1:5000/api/decrypted-stream/3601Q0700624502#input=mpegts
+```
+
+这条解密流现在会输出带音频的 `MPEG-TS`，当前实测样本可识别为 `H.264 + AAC`。
+
+如果你想保留旧模式，也可以改成 `mode=raw`，让 `go2rtc` 继续拉 `/api/go2rtc/stream/<sn>` 对应的原始 FLV。
+
+前端页面里的 `go2rtc 接入` 面板也会优先生成服务端解密版 YAML。
+
 ## 目录入口
 
 - 后端说明: [docs/backend-api.md](docs/backend-api.md)
