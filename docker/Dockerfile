@@ -2,17 +2,17 @@
 FROM python:3.11-slim
 
 # 设置环境变量
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
-ENV CAMERA_CONFIG_PATH /app/backend/data/config.yaml
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV CAMERA_CONFIG_PATH=/app/backend/data/config.yaml
 
-# 安装系统依赖 (FFmpeg, Node.js 18, 以及构建工具)
+# 安装系统依赖 (FFmpeg 和 Node.js)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     ca-certificates \
-    && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
-    && apt-get install -y nodejs \
+    nodejs \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
