@@ -1,0 +1,459 @@
+// ==================== 全局变量 ====================
+let apiResponse = null;
+let currentPlayer = null;
+let currentConfigId = null;
+let go2rtcConfig = null;
+
+function getDefaultBackendBaseUrl() {
+    if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
+        return window.location.origin;
+    }
+    return 'http://127.0.0.1:5000';
+}
+
+function getBackendBaseUrl() {
+    return document.getElementById('backend-base-url').value.trim().replace(/\/$/, '');
+}
+
+function buildApiUrl(path) {
+    return `${getBackendBaseUrl()}${path}`;
+}
+
+function slugifyGo2rtcName(name, sn = '') {
+    const lowerName = (name || '').toLowerCase();
+    const normalized = lowerName
+        .replace(/[^a-z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '');
+    const snSuffix = (sn || 'unknown').toLowerCase().slice(-6);
+    return normalized ? `${normalized}_${snSuffix}` : `camera_${snSuffix}`;
+}
+
+function buildLocalGo2rtcConfig(sn) {
+    const cameraName = (apiResponse && (apiResponse.camera_name || apiResponse.name)) || '';
+    const streamName = slugifyGo2rtcName(cameraName, sn);
+    const mode = document.getElementById('go2rtc-mode').value || 'decrypted';
+    const configId = currentConfigId !== null ? currentConfigId : 0;
+    const isDecryptedMode = mode === 'decrypted';
+    const sourceUrl = buildApiUrl(isDecryptedMode ? `/api/decrypted-stream/${configId}/${encodeURIComponent(sn)}` : `/api/stream/${encodeURIComponent(sn)}`);
+    const go2rtcSource = `${sourceUrl}#input=${isDecryptedMode ? 'mpegts' : 'flv'}`;
+    const yaml = `streams:\n  ${streamName}:\n  - ${go2rtcSource}\n`;
+
+    return {
+        count: 1,
+        mode,
+        note: isDecryptedMode
+            ? '后端未提供 /api/go2rtc/config，当前为前端本地生成的服务端解密配置；请确认后端已升级且支持 /api/decrypted-stream/<sn>。'
+            : '后端未提供 /api/go2rtc/config，当前为前端本地生成的原始流代理配置。',
+        public_base_url: getBackendBaseUrl(),
+        streams: [
+            {
+                name: cameraName,
+                sn: sn,
+                stream_name: streamName,
+                source_url: sourceUrl,
+                go2rtc_source: go2rtcSource,
+                mode
+            }
+        ],
+        yaml
+    };
+}
+
+function applyGo2rtcConfig(result, sourceLabel = '后端接口') {
+    go2rtcConfig = result;
+    const stream = (result.streams || [])[0] || {};
+    document.getElementById('go2rtc-yaml').value = result.yaml || '';
+    document.getElementById('go2rtc-stream-name').textContent = stream.stream_name || '-';
+    document.getElementById('go2rtc-source-url').textContent = stream.go2rtc_source || stream.ffmpeg_source || '-';
+    document.getElementById('go2rtc-section').classList.add('visible');
+    log(`go2rtc 配置已生成 (${sourceLabel})`, 'success');
+}
+
+// ==================== 日志函数 ====================
+function log(message, type = 'info') {
+    const logContainer = document.getElementById('log-container');
+    const time = new Date().toLocaleTimeString();
+    const entry = document.createElement('div');
+    entry.className = `log-entry log-${type}`;
+    entry.textContent = `[${time}] ${message}`;
+    logContainer.appendChild(entry);
+    logContainer.scrollTop = logContainer.scrollHeight;
+    console.log(`[${type.toUpperCase()}]`, message);
+}
+
+function syncCameraSelection() {
+    const select = document.getElementById('camera-select');
+    const snInput = document.getElementById('camera-sn-input');
+    if (select.value) {
+        snInput.value = select.value;
+    }
+}
+
+async function loadCameraList() {
+    const select = document.getElementById('camera-select');
+    select.innerHTML = '<option value="">摄像机列表加载中...</option>';
+
+    try {
+        const response = await fetch(buildApiUrl('/api/cameras'));
+        const result = await response.json();
+
+        if (!response.ok || result.error) {
+            throw new Error(result.error || '加载摄像机列表失败');
+        }
+
+        const cameras = result.cameras || [];
+        if (!cameras.length) {
+            select.innerHTML = '<option value="">配置中没有可用摄像机</option>';
+            log('后端已连接，但配置中没有可用摄像机', 'warning');
+            return;
+        }
+
+        select.innerHTML = '<option value="">请选择摄像机</option>';
+        cameras.forEach((camera) => {
+            const option = document.createElement('option');
+            option.value = camera.sn;
+            option.textContent = `${camera.name || camera.sn} (${camera.api_version || 'v2'})`;
+            select.appendChild(option);
+        });
+
+        log(`已加载 ${cameras.length} 个摄像机`, 'success');
+    } catch (error) {
+        select.innerHTML = '<option value="">加载失败</option>';
+        log(`加载摄像机列表失败: ${error.message}`, 'error');
+    }
+}
+
+async function fetchPlayInfo() {
+    const sn = document.getElementById('camera-sn-input').value.trim();
+    if (!sn) {
+        log('请先输入摄像机 SN', 'error');
+        alert('请先输入摄像机 SN');
+        return;
+    }
+
+    log(`正在从后端获取播放信息: ${sn}`, 'info');
+
+    try {
+        const response = await fetch(buildApiUrl(`/api/play-info?sn=${encodeURIComponent(sn)}`));
+        const result = await response.json();
+
+        if (!response.ok || result.errorCode !== 0) {
+            throw new Error(result.errorMsg || result.error || '获取播放信息失败');
+        }
+
+        document.getElementById('json-input').value = JSON.stringify(result, null, 4);
+        applyApiResponse(result, '后端接口');
+        await fetchGo2rtcConfig(sn);
+    } catch (error) {
+        log(`获取播放信息失败: ${error.message}`, 'error');
+        alert(`获取播放信息失败: ${error.message}`);
+    }
+}
+
+// ==================== JSON解析 ====================
+function parseJson() {
+    const jsonInput = document.getElementById('json-input').value.trim();
+
+    if (!jsonInput) {
+        log('请输入JSON数据', 'error');
+        alert('请输入JSON数据');
+        return;
+    }
+
+    try {
+        const parsed = JSON.parse(jsonInput);
+        applyApiResponse(parsed, '手动 JSON');
+    } catch (e) {
+        log(`JSON解析失败: ${e.message}`, 'error');
+        alert(`JSON解析失败: ${e.message}`);
+    }
+}
+
+function applyApiResponse(payload, sourceLabel) {
+    apiResponse = payload;
+    log(`${sourceLabel} 数据解析成功`, 'success');
+
+    if (apiResponse.errorCode !== undefined) {
+        if (apiResponse.errorCode !== 0) {
+            log(`API返回错误: ${apiResponse.errorMsg || '未知错误'}`, 'error');
+            alert(`API返回错误: ${apiResponse.errorMsg || '未知错误'}`);
+        } else {
+            log('API返回成功', 'success');
+        }
+    }
+
+    displayVideoInfo();
+    document.getElementById('go2rtc-section').classList.add('visible');
+    document.getElementById('config-section').classList.add('visible');
+    document.getElementById('player-section').classList.add('visible');
+    log('视频流信息已加载，请选择解密配置进行测试', 'info');
+}
+
+// ==================== 显示视频流信息 ====================
+function displayVideoInfo() {
+    if (!apiResponse) return;
+
+    document.getElementById('info-flashUrl').textContent = apiResponse.flashUrl || apiResponse.sourceFlashUrl || '-';
+    document.getElementById('info-relayStream').textContent = apiResponse.relayStream || '-';
+    document.getElementById('info-playKey').textContent = apiResponse.playKey || '-';
+    document.getElementById('info-keyLength').textContent = apiResponse.playKey ? `${apiResponse.playKey.length} 字符` : '-';
+    document.getElementById('info-relay').textContent = apiResponse.relay ? apiResponse.relay.join(', ') : '-';
+    document.getElementById('info-relayId').textContent = apiResponse.relayId || '-';
+    document.getElementById('info-relaySig').textContent = apiResponse.relaySig || '-';
+    document.getElementById('info-errorMsg').textContent = apiResponse.backendDecryptNote || apiResponse.errorMsg || '-';
+
+    document.getElementById('video-stream-section').classList.add('visible');
+
+    log('视频流信息已显示', 'success');
+}
+
+function getCurrentCameraSn() {
+    return (apiResponse && (apiResponse.camera_sn || apiResponse.sn)) || document.getElementById('camera-sn-input').value.trim();
+}
+
+async function fetchGo2rtcConfig(explicitSn = '') {
+    const sn = explicitSn || getCurrentCameraSn();
+    const mode = document.getElementById('go2rtc-mode').value || 'decrypted';
+    const configId = currentConfigId !== null ? currentConfigId : 0;
+    if (!sn) {
+        log('请先输入摄像机 SN，再生成 go2rtc 配置', 'error');
+        alert('请先输入摄像机 SN');
+        return;
+    }
+
+    try {
+        const response = await fetch(buildApiUrl(`/api/go2rtc/config?sn=${encodeURIComponent(sn)}&mode=${encodeURIComponent(mode)}&config_id=${encodeURIComponent(configId)}`));
+        const result = await response.json();
+        if (!response.ok || result.error) {
+            const errorMessage = result.error || '生成 go2rtc 配置失败';
+            const shouldFallback = response.status === 404 || errorMessage.includes('文件不存在: api/go2rtc/config');
+            if (shouldFallback) {
+                applyGo2rtcConfig(buildLocalGo2rtcConfig(sn), '前端兜底');
+                log('检测到后端仍是旧版本，已自动切换为前端生成 go2rtc 配置', 'warning');
+                return;
+            }
+            throw new Error(errorMessage);
+        }
+
+        applyGo2rtcConfig(result, '后端接口');
+    } catch (error) {
+        log(`生成 go2rtc 配置失败: ${error.message}`, 'error');
+    }
+}
+
+async function copyGo2rtcYaml() {
+    const yamlText = document.getElementById('go2rtc-yaml').value.trim();
+    if (!yamlText) {
+        log('当前没有可复制的 go2rtc 配置', 'warning');
+        return;
+    }
+
+    try {
+        await navigator.clipboard.writeText(yamlText);
+        log('go2rtc YAML 已复制到剪贴板', 'success');
+    } catch (error) {
+        log(`复制失败: ${error.message}`, 'error');
+    }
+}
+
+// ==================== 清空输入 ====================
+function clearInput() {
+    document.getElementById('json-input').value = '';
+    log('输入已清空', 'info');
+}
+
+// ==================== 加载示例数据 ====================
+function loadSampleData() {
+    const sampleData = {
+        "errorCode": 0,
+        "playKey": "解密密钥",
+        "relay": ["中继服务器地址1", "中继服务器地址2", "中继服务器地址3"],
+        "relayId": "中继ID",
+        "relaySig": "中继签名",
+        "relayStream": "中继流标识",
+        "flashUrl": "视频流完整URL",
+        "errorMsg": "成功",
+        "data": {}
+    };
+
+    document.getElementById('json-input').value = JSON.stringify(sampleData, null, 4);
+    log('示例数据已加载', 'success');
+}
+
+// ==================== 获取配置 ====================
+function getConfigs() {
+    return [
+        {
+            id: 0,
+            name: '默认解密方式',
+            keyType: 0,
+            key: apiResponse.playKey,
+            keyForKey: null,
+            description: 'keyType=0, 使用playKey'
+        },
+        {
+            id: 1,
+            name: '解密方式1',
+            keyType: 1,
+            key: apiResponse.playKey,
+            keyForKey: null,
+            description: 'keyType=1, 使用playKey'
+        },
+        {
+            id: 2,
+            name: '不使用密钥',
+            keyType: 0,
+            key: null,
+            keyForKey: null,
+            description: 'keyType=0, key=null (测试未加密流)'
+        },
+        {
+            id: 3,
+            name: '使用中继签名',
+            keyType: 0,
+            key: apiResponse.playKey,
+            keyForKey: apiResponse.relaySig,
+            description: 'keyType=0, 使用relaySig作为keyForKey'
+        }
+    ];
+}
+
+// ==================== 更新状态 ====================
+function updateStatus(status) {
+    document.getElementById('player-status').textContent = status;
+}
+
+// ==================== 更新当前配置显示 ====================
+function updateCurrentConfig(config) {
+    document.getElementById('current-config').textContent = config.name;
+
+    document.querySelectorAll('.config-item').forEach(item => {
+        item.classList.remove('active-config');
+    });
+    document.getElementById(`config-${config.id}`).classList.add('active-config');
+}
+
+// ==================== 停止当前播放器 ====================
+function stopCurrentPlayer() {
+    if (currentPlayer) {
+        try {
+            currentPlayer.stop();
+        } catch (e) {
+            console.error('停止播放器失败:', e);
+        }
+        currentPlayer = null;
+    }
+}
+
+// ==================== 测试配置 ====================
+function testConfig(configId) {
+    if (!apiResponse) {
+        log('请先解析JSON数据', 'error');
+        alert('请先解析JSON数据');
+        return;
+    }
+
+    if (!checkPlayerLoaded()) {
+        updateStatus('播放器未加载');
+        return;
+    }
+
+    const configs = getConfigs();
+    const config = configs[configId];
+
+    log(`开始测试配置 ${configId}: ${config.name}`, 'info');
+    updateCurrentConfig(config);
+
+    stopCurrentPlayer();
+    updateStatus('正在初始化...');
+
+    const container = document.getElementById('video-container');
+
+    try {
+        const streamUrl = apiResponse.flashUrl || apiResponse.sourceFlashUrl;
+
+        const playerConfig = {
+            container: container,
+            src: streamUrl,
+            key: config.key,
+            keyType: config.keyType,
+            isLive: true,
+            autoplay: true,
+            logLevel: 2,
+            renderType: 'all',
+            resample: 0
+        };
+
+        if (config.keyForKey) {
+            playerConfig.keyForKey = config.keyForKey;
+        }
+
+        log(`播放器配置: ${JSON.stringify(playerConfig)}`, 'info');
+
+        currentPlayer = new QhwwPlayer(playerConfig);
+
+        currentPlayer.on({
+            ready: () => {
+                log('播放器就绪', 'success');
+                updateStatus('播放器就绪');
+            },
+            play: () => {
+                log('开始播放', 'success');
+                updateStatus('正在播放');
+            },
+            pause: () => {
+                log('暂停播放', 'info');
+                updateStatus('已暂停');
+            },
+            stop: () => {
+                log('停止播放', 'info');
+                updateStatus('已停止');
+            },
+            error: (error) => {
+                log(`播放错误: ${error}`, 'error');
+                updateStatus('播放错误');
+            },
+            timeupdate: () => {
+            }
+        });
+
+        currentConfigId = configId;
+    } catch (e) {
+        log(`创建播放器失败: ${e.message}`, 'error');
+        updateStatus('创建播放器失败');
+    }
+}
+
+// ==================== 停止所有测试 ====================
+function stopAllTests() {
+    log('停止所有测试', 'info');
+    stopCurrentPlayer();
+    currentConfigId = null;
+    updateStatus('已停止');
+    document.querySelectorAll('.config-item').forEach(item => {
+        item.classList.remove('active-config');
+    });
+}
+
+// ==================== 清空日志 ====================
+function clearLogs() {
+    document.getElementById('log-container').innerHTML = '';
+    log('日志已清空', 'info');
+}
+
+// ==================== 初始化 ====================
+document.addEventListener('DOMContentLoaded', function() {
+    document.getElementById('backend-base-url').value = getDefaultBackendBaseUrl();
+    log('=== 360智能摄像机视频流解密工具 ===', 'success');
+    log('系统初始化完成', 'success');
+    log('页面已切换为后端驱动模式，建议先加载摄像机列表，再获取播放信息', 'info');
+
+    setTimeout(function() {
+        checkPlayerLoaded();
+    }, 1000);
+
+    loadCameraList();
+
+    log('');
+    updateStatus('等待输入');
+});
