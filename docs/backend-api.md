@@ -25,12 +25,12 @@
 
 ## go2rtc 接入
 
-推荐优先让 `go2rtc` 通过 `ffmpeg` 拉取后端解密后的 MPEG-TS：
+推荐优先让 `go2rtc` 直接拉取后端解密后的 MPEG-TS：
 
 ```yaml
 streams:
   living_room_624502:
-    - ffmpeg:https://your-backend.example.com/api/decrypted-stream/3601Q0700624502#input=mpegts
+    - https://your-backend.example.com/api/decrypted-stream/3601Q0700624502#input=mpegts
 ```
 
 如果你只想走原始流代理，也可以继续使用 FLV：
@@ -38,7 +38,7 @@ streams:
 ```yaml
 streams:
   living_room:
-    - ffmpeg:https://your-backend.example.com/api/go2rtc/stream/3601Q0700624502#input=flv
+    - https://your-backend.example.com/api/go2rtc/stream/3601Q0700624502#input=flv
 ```
 
 如果想让后端直接生成片段，可以请求：
@@ -52,7 +52,7 @@ curl "http://127.0.0.1:5000/api/go2rtc/config?sn=3601Q0700624502&mode=decrypted&
 - `/api/go2rtc/stream/<sn>` 是 `/api/stream/<sn>` 的语义化别名，方便在 `go2rtc.yaml` 中引用。
 - `/api/decrypted-stream/<sn>` 会启动 Node + wasm 解密器，把加密 FLV 直接解码后再转成 MPEG-TS 输出。
 - 当前 `MPEG-TS` 输出已包含视频和音频，样本验证结果为 `H.264 + AAC`。
-- `/api/go2rtc/config` 默认返回 JSON，其中包含 `yaml` 字段和每个摄像机对应的 `ffmpeg_source`，支持 `mode=raw` 和 `mode=decrypted`。
+- `/api/go2rtc/config` 默认返回 JSON，其中包含 `yaml` 字段和每个摄像机对应的 `go2rtc_source`，支持 `mode=raw` 和 `mode=decrypted`。
 - 当前服务端解密方案本质上是“把播放器使用的 wasm 解密核心搬到 Node 后端”，还不是纯 Python/Go 重写版算法。
 
 ## 常用命令
@@ -60,5 +60,10 @@ curl "http://127.0.0.1:5000/api/go2rtc/config?sn=3601Q0700624502&mode=decrypted&
 ```bash
 cd backend
 pip install -r requirements.txt
+mkdir -p data
 python server.py
 ```
+
+如果 `data/config.yaml` 不存在，服务启动时会自动用 `backend/config.example.yaml` 复制生成一份。
+
+`data/config.yaml` 只需要在 `cookie` 列表里填写 `Q`、`T`、`jia_web_sid` 三个认证字段。

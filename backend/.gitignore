@@ -2,6 +2,8 @@
 result.json
 config.yaml
 output/
+data/config.yaml
+data/play_info_cache/
 
 # Python
 __pycache__/

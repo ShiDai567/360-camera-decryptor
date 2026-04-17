@@ -8,6 +8,8 @@ import os
 import re
 import subprocess
 import time
+import json
+import shutil
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, Optional
@@ -34,11 +36,27 @@ class CameraBackendService:
     """封装配置读取、播放信息获取、批量保存与缓存。"""
 
     def __init__(self, config_path: Optional[str] = None):
-        self.config_path = Path(config_path or BACKEND_DIR / "configs" / "config.yaml")
+        self.data_dir = BACKEND_DIR / "data"
+        self.example_config_path = BACKEND_DIR / "config.example.yaml"
+        default_config_path = self.data_dir / "config.yaml"
+        legacy_config_path = BACKEND_DIR / "configs" / "config.yaml"
+        selected_config_path = config_path or (
+            default_config_path if default_config_path.exists() or not legacy_config_path.exists() else legacy_config_path
+        )
+        self.config_path = Path(selected_config_path)
         self._cache: Dict[str, Dict[str, Any]] = {}
         self._lock = Lock()
 
+    def ensure_config_file(self) -> None:
+        if self.config_path.exists():
+            return
+        if self.config_path == self.data_dir / "config.yaml" and self.example_config_path.exists():
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(self.example_config_path, self.config_path)
+            return
+
     def load_config(self) -> Dict[str, Any]:
+        self.ensure_config_file()
         if not self.config_path.exists():
             raise ConfigError(f"配置文件不存在: {self.config_path}")
         with self.config_path.open("r", encoding="utf-8") as handle:
@@ -46,6 +64,15 @@ class CameraBackendService:
 
     def get_request_interval(self) -> float:
         return float(self.load_config().get("request_interval", 2))
+
+    def get_play_info_cache_dir(self) -> Path:
+        server_config = self.load_config().get("server", {})
+        configured = (server_config.get("play_info_cache_dir") or "").strip()
+        cache_dir = Path(configured) if configured else self.data_dir / "play_info_cache"
+        if not cache_dir.is_absolute():
+            cache_dir = ROOT_DIR / cache_dir
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return cache_dir
 
     def list_cameras(self) -> list[Dict[str, Any]]:
         config = self.load_config()
@@ -69,11 +96,110 @@ class CameraBackendService:
 
     def _build_api_client(self, config: Dict[str, Any]) -> CameraAPIRequest:
         api = CameraAPIRequest(verbose=False)
-        cookie = (config.get("cookie") or "").strip()
-        if not cookie:
-            raise ConfigError("config.yaml 中缺少 cookie，无法请求 360 播放接口")
-        api.set_cookie_from_string(cookie)
+        auth_cookies: Dict[str, str] = {}
+        cookie_list = config.get("cookie")
+        if isinstance(cookie_list, list):
+            for item in cookie_list:
+                if isinstance(item, dict):
+                    for key, value in item.items():
+                        auth_cookies[str(key).strip()] = str(value or "").strip()
+
+        if not auth_cookies:
+            auth_cookies = {
+                "Q": (config.get("Q") or "").strip(),
+                "T": (config.get("T") or "").strip(),
+                "jia_web_sid": (config.get("jia_web_sid") or "").strip(),
+            }
+
+        if all(auth_cookies.values()):
+            api.set_cookies(auth_cookies)
+            return api
+
+        # 兼容旧版整段 cookie 配置，避免已有部署立即失效。
+        cookie = config.get("cookie")
+        if isinstance(cookie, str) and cookie.strip():
+            api.set_cookie_from_string(cookie.strip())
+            return api
+
+        required_fields = ["Q", "T", "jia_web_sid"]
+        missing = [name for name in required_fields if not auth_cookies.get(name)]
+        raise ConfigError(
+            "config.yaml 中缺少认证字段，需填写 cookie 下的 Q、T、jia_web_sid"
+            if len(missing) == len(required_fields)
+            else f"config.yaml 中缺少认证字段: {', '.join(missing)}"
+        )
         return api
+
+    def _get_cache_file_path(self, sn: str) -> Path:
+        safe_sn = re.sub(r"[^a-zA-Z0-9_.-]+", "_", sn).strip("_") or "unknown"
+        return self.get_play_info_cache_dir() / f"{safe_sn}.json"
+
+    def _load_persisted_play_info(self, sn: str) -> Optional[Dict[str, Any]]:
+        cache_file = self._get_cache_file_path(sn)
+        if not cache_file.exists():
+            return None
+        try:
+            with cache_file.open("r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            app.logger.warning("failed to load persisted play-info cache for sn=%s: %s", sn, exc)
+            return None
+        if not isinstance(payload, dict):
+            return None
+        payload.setdefault("cache_source", "persisted")
+        return payload
+
+    def _save_persisted_play_info(self, sn: str, payload: Dict[str, Any]) -> None:
+        cache_file = self._get_cache_file_path(sn)
+        tmp_file = cache_file.with_suffix(".json.tmp")
+        try:
+            with tmp_file.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+            tmp_file.replace(cache_file)
+        except OSError as exc:
+            app.logger.warning("failed to persist play-info cache for sn=%s: %s", sn, exc)
+            try:
+                if tmp_file.exists():
+                    tmp_file.unlink()
+            except OSError:
+                pass
+
+    def _remember_play_info(self, sn: str, payload: Dict[str, Any], cached_at: Optional[float] = None) -> Dict[str, Any]:
+        normalized_payload = dict(payload)
+        cache_time = cached_at if cached_at is not None else time.time()
+        with self._lock:
+            self._cache[sn] = {"cached_at": cache_time, "payload": dict(normalized_payload)}
+        self._save_persisted_play_info(sn, normalized_payload)
+        return normalized_payload
+
+    def _upstream_stream_headers(self) -> Dict[str, str]:
+        return {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "*/*",
+            "Referer": "https://my.jia.360.cn/",
+        }
+
+    def _can_open_stream(self, payload: Dict[str, Any]) -> bool:
+        flash_url = (payload or {}).get("flashUrl")
+        if not flash_url:
+            return False
+        try:
+            upstream = requests.get(
+                flash_url,
+                headers=self._upstream_stream_headers(),
+                stream=True,
+                timeout=(5, 10),
+            )
+        except requests.RequestException as exc:
+            app.logger.warning("cached flashUrl probe failed for sn=%s: %s", payload.get("camera_sn", ""), exc)
+            return False
+        try:
+            return upstream.status_code < 400
+        finally:
+            upstream.close()
 
     def _fetch_from_remote(self, sn: str, camera: Dict[str, Any], api: CameraAPIRequest) -> Dict[str, Any]:
         preferred_is_v2 = camera.get("api_version", "v2").lower() == "v2"
@@ -98,23 +224,49 @@ class CameraBackendService:
         now = time.time()
         cache_ttl = int(self.load_config().get("server", {}).get("play_info_cache_seconds", 30))
 
-        with self._lock:
-            cached = self._cache.get(sn)
-            if cached and not force_refresh and now - cached["cached_at"] < cache_ttl:
-                return dict(cached["payload"])
+        persisted_payload: Optional[Dict[str, Any]] = None
+
+        if not force_refresh:
+            with self._lock:
+                cached = self._cache.get(sn)
+                if cached and now - cached["cached_at"] < cache_ttl:
+                    return dict(cached["payload"])
+
+            persisted_payload = self._load_persisted_play_info(sn)
+            if persisted_payload:
+                # 本地文件作为长期缓存，避免每次请求都打到上游 play-info 接口。
+                return self._remember_play_info(sn, persisted_payload, cached_at=now)
 
         camera = self.find_camera(sn)
         payload = self._fetch_from_remote(sn, camera, self._build_api_client(self.load_config()))
         if payload.get("errorCode") != 0:
+            if persisted_payload:
+                app.logger.warning(
+                    "play-info refresh failed for sn=%s, falling back to persisted cache result=%s",
+                    sn,
+                    payload,
+                )
+                return self._remember_play_info(sn, persisted_payload, cached_at=now)
             return payload
 
         payload["camera_name"] = camera.get("name", "")
         payload["camera_sn"] = sn
         payload["fetched_at"] = int(now)
+        payload["cache_source"] = "remote"
+        return self._remember_play_info(sn, payload, cached_at=now)
 
-        with self._lock:
-            self._cache[sn] = {"cached_at": now, "payload": dict(payload)}
-        return payload
+    def get_play_info_for_stream(self, sn: str, force_refresh: bool = False) -> Dict[str, Any]:
+        payload = self.get_play_info(sn, force_refresh=force_refresh)
+        if force_refresh or payload.get("errorCode") != 0:
+            return payload
+        if self._can_open_stream(payload):
+            return payload
+
+        app.logger.warning("persisted play-info could not open stream for sn=%s, refreshing upstream", sn)
+        refreshed = self.get_play_info(sn, force_refresh=True)
+        if refreshed.get("errorCode") == 0:
+            refreshed["cache_source"] = "remote_refresh"
+        return refreshed
 
     def get_stream_url(self, sn: str, force_refresh: bool = False) -> str:
         payload = self.get_play_info(sn, force_refresh=force_refresh)
@@ -135,16 +287,16 @@ class CameraBackendService:
         stream_name = self.build_go2rtc_stream_name(camera)
         if mode == "decrypted":
             source_url = f"{public_base_url}/api/decrypted-stream/{config_id}/{camera['sn']}"
-            ffmpeg_source = f"ffmpeg:{source_url}#input=mpegts"
+            go2rtc_source = f"{source_url}#input=mpegts"
         else:
             source_url = f"{public_base_url}/api/go2rtc/stream/{camera['sn']}"
-            ffmpeg_source = f"ffmpeg:{source_url}#input=flv"
+            go2rtc_source = f"{source_url}#input=flv"
         return {
             "name": camera.get("name", ""),
             "sn": camera.get("sn", ""),
             "stream_name": stream_name,
             "source_url": source_url,
-            "ffmpeg_source": ffmpeg_source,
+            "go2rtc_source": go2rtc_source,
             "mode": mode,
         }
 
@@ -158,7 +310,7 @@ class CameraBackendService:
         items = []
         for camera in cameras:
             entry = self.build_go2rtc_stream_entry(camera, public_base_url, mode=mode, config_id=config_id)
-            streams[entry["stream_name"]] = [entry["ffmpeg_source"]]
+            streams[entry["stream_name"]] = [entry["go2rtc_source"]]
             items.append(entry)
 
         yaml_text = yaml.safe_dump(
@@ -331,24 +483,42 @@ def proxy_stream(sn: str) -> Response:
     except ConfigError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    upstream_headers = {
-        "User-Agent": request.headers.get(
-            "User-Agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        ),
-        "Accept": request.headers.get("Accept", "*/*"),
-        "Referer": "https://my.jia.360.cn/",
-    }
+    upstream_headers = service._upstream_stream_headers()
+    if request.headers.get("User-Agent"):
+        upstream_headers["User-Agent"] = request.headers["User-Agent"]
+    if request.headers.get("Accept"):
+        upstream_headers["Accept"] = request.headers["Accept"]
+
+    def open_upstream(url: str):
+        return requests.get(url, headers=upstream_headers, stream=True, timeout=(10, 60))
 
     try:
-        upstream = requests.get(remote_url, headers=upstream_headers, stream=True, timeout=(10, 60))
+        upstream = open_upstream(remote_url)
     except requests.RequestException as exc:
-        return jsonify({"error": f"上游流请求失败: {exc}"}), 502
+        app.logger.warning("stream open failed for sn=%s with cached play-info, refreshing: %s", sn, exc)
+        try:
+            remote_url = service.get_stream_url(sn, force_refresh=True)
+            upstream = open_upstream(remote_url)
+        except ConfigError as config_exc:
+            return jsonify({"error": str(config_exc)}), 400
+        except requests.RequestException as refresh_exc:
+            return jsonify({"error": f"上游流请求失败: {refresh_exc}"}), 502
 
     if upstream.status_code >= 400:
         details = upstream.text[:400]
         upstream.close()
-        return jsonify({"error": "上游流返回错误", "status_code": upstream.status_code, "details": details}), 502
+        app.logger.warning("stream open returned status=%s for sn=%s, refreshing play-info", upstream.status_code, sn)
+        try:
+            remote_url = service.get_stream_url(sn, force_refresh=True)
+            upstream = open_upstream(remote_url)
+        except ConfigError as config_exc:
+            return jsonify({"error": str(config_exc)}), 400
+        except requests.RequestException as refresh_exc:
+            return jsonify({"error": f"上游流请求失败: {refresh_exc}"}), 502
+        if upstream.status_code >= 400:
+            details = upstream.text[:400]
+            upstream.close()
+            return jsonify({"error": "上游流返回错误", "status_code": upstream.status_code, "details": details}), 502
 
     def generate():
         try:
@@ -377,7 +547,7 @@ def go2rtc_stream(sn: str) -> Response:
 def decrypted_stream(config_id: str, sn: str) -> Response:
     try:
         config_id_int = int(config_id)
-        payload = service.get_play_info(sn, force_refresh=request.args.get("refresh") == "1")
+        payload = service.get_play_info_for_stream(sn, force_refresh=request.args.get("refresh") == "1")
         if payload.get("errorCode") != 0:
             raise ConfigError(payload.get("errorMsg", "未获取到播放信息"))
         play_key = payload.get("playKey")

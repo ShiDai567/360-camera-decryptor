@@ -14,11 +14,15 @@
 ```bash
 cd backend
 pip install -r requirements.txt
-cp backend/configs/config.example.yaml backend/configs/config.yaml
+mkdir -p data
 python server.py
 ```
 
 打开 `http://127.0.0.1:5000/` 即可使用前端页面。
+
+首次启动时，如果 `data/config.yaml` 不存在，后端会自动用 `backend/config.example.yaml` 复制生成一份。
+
+`data/config.yaml` 里只需要填写浏览器 Cookie 中的 `Q`、`T`、`jia_web_sid` 三个值，按 `cookie` 列表格式配置即可。
 
 常用命令：
 
@@ -40,7 +44,7 @@ curl "http://127.0.0.1:5000/api/go2rtc/config?sn=3601Q0700624502&mode=decrypted&
 ```yaml
 streams:
   one_624502:
-    - ffmpeg:http://127.0.0.1:5000/api/decrypted-stream/3601Q0700624502#input=mpegts
+    - http://127.0.0.1:5000/api/decrypted-stream/3601Q0700624502#input=mpegts
 ```
 
 这条解密流现在会输出带音频的 `MPEG-TS`，当前实测样本可识别为 `H.264 + AAC`。

@@ -10,9 +10,10 @@
 │   │   ├── cli.py            # CLI 入口逻辑
 │   │   └── service.py        # Flask 服务与批量同步逻辑
 │   ├── server.py             # Flask 服务兼容入口
-│   ├── configs/              # 配置文件目录
-│   │   ├── config.example.yaml   # 配置模板
+│   ├── config.example.yaml   # 配置模板
+│   ├── data/                 # 配置与运行期缓存
 │   │   ├── config.yaml           # 本地配置
+│   │   └── play_info_cache/      # 播放信息持久化缓存
 ├── frontend/                 # 前端调试页与播放器资源
 ├── docs/                     # 文档
 │   ├── PROJECT_STRUCTURE.md

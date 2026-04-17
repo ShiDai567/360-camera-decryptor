@@ -1,9 +1,12 @@
 # 360智能摄像机配置文件
-# 请复制此文件为 config.yaml 并填入实际数据
+# 如果 backend/data/config.yaml 不存在，服务启动时会自动用本模板生成
 
-# Cookie 配置
-cookie: |
-  xxxxxxxxxxxxxxxx
+# 认证配置
+# 只需要从浏览器 Cookie 中分别填入这三个值
+cookie:
+  - Q: ""
+  - T: ""
+  - jia_web_sid: ""
 
 # 摄像机列表
 cameras:
@@ -26,6 +29,8 @@ request_interval: 3
 server:
   # 播放信息缓存秒数，避免前端获取到的密钥和代理流地址错位
   play_info_cache_seconds: 30
+  # 播放信息本地持久化目录；留空时默认使用 backend/data/play_info_cache
+  play_info_cache_dir: ""
   # 部署在反向代理后面时，显式指定前端可访问的后端公网地址
   # 例如: "https://you.domain.com"
   public_base_url: ""

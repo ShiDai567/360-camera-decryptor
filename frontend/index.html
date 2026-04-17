@@ -1016,7 +1016,7 @@
                         sn: sn,
                         stream_name: streamName,
                         source_url: sourceUrl,
-                        ffmpeg_source: ffmpegSource,
+                        go2rtc_source: ffmpegSource,
                         mode
                     }
                 ],
@@ -1029,7 +1029,7 @@
             const stream = (result.streams || [])[0] || {};
             document.getElementById('go2rtc-yaml').value = result.yaml || '';
             document.getElementById('go2rtc-stream-name').textContent = stream.stream_name || '-';
-            document.getElementById('go2rtc-source-url').textContent = stream.ffmpeg_source || '-';
+            document.getElementById('go2rtc-source-url').textContent = stream.go2rtc_source || stream.ffmpeg_source || '-';
             document.getElementById('go2rtc-section').classList.add('visible');
             log(`go2rtc 配置已生成 (${sourceLabel})`, 'success');
         }

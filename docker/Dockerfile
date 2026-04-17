@@ -4,7 +4,7 @@ FROM python:3.11-slim
 # 设置环境变量
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
-ENV CAMERA_CONFIG_PATH /app/backend/configs/config.yaml
+ENV CAMERA_CONFIG_PATH /app/backend/data/config.yaml
 
 # 安装系统依赖 (FFmpeg, Node.js 18, 以及构建工具)
 RUN apt-get update && apt-get install -y --no-install-recommends \
