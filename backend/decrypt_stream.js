@@ -107,8 +107,23 @@ function transHeapBuffer(module, ptr, length) {
   return Buffer.from(module.HEAPU8.subarray(ptr, ptr + length));
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 class FfmpegTsMuxer {
-  constructor({ fps, width, height, audioChannels, audioSampleRate, audioSampleFormat, outputPath, quiet }) {
+  constructor({
+    fps,
+    width,
+    height,
+    audioChannels,
+    audioSampleRate,
+    audioSampleFormat,
+    outputPath,
+    quiet,
+    maxPendingVideoBytes,
+    maxPendingAudioBytes,
+  }) {
     const hasAudio = Boolean(audioChannels && audioSampleRate && audioSampleFormat);
     const audioInputArgs = hasAudio
       ? [
@@ -178,47 +193,129 @@ class FfmpegTsMuxer {
     this.videoIn = this.process.stdin;
     this.audioIn = hasAudio ? this.process.stdio[3] : null;
     this.stdout = outputPath ? null : this.process.stdout;
-    this.videoPendingWrite = Promise.resolve();
-    this.audioPendingWrite = Promise.resolve();
+    this.videoQueue = [];
+    this.audioQueue = [];
+    this.videoQueuedBytes = 0;
+    this.audioQueuedBytes = 0;
+    this.maxPendingVideoBytes = Math.max(1024 * 1024, Number(maxPendingVideoBytes || 8 * 1024 * 1024));
+    this.maxPendingAudioBytes = Math.max(256 * 1024, Number(maxPendingAudioBytes || 2 * 1024 * 1024));
+    this.videoDraining = false;
+    this.audioDraining = false;
+    this.closed = false;
+    this.lastError = null;
+
+    const onProcessExit = (error) => {
+      this.lastError = error || this.lastError || new Error("FFmpeg 已退出");
+      this.closed = true;
+      this.videoQueue.length = 0;
+      this.audioQueue.length = 0;
+      this.videoQueuedBytes = 0;
+      this.audioQueuedBytes = 0;
+    };
+
+    this.process.once("error", (error) => onProcessExit(error));
+    this.process.once("exit", (code, signal) => {
+      if (code === 0 || code === null) {
+        onProcessExit(null);
+        return;
+      }
+      const reason = signal ? `signal=${signal}` : `code=${code}`;
+      onProcessExit(new Error(`FFmpeg 异常退出 (${reason})`));
+    });
   }
 
-  writeToStream(stream, pendingKey, frameBuffer) {
-    this[pendingKey] = this[pendingKey].then(
-      () =>
-        new Promise((resolve, reject) => {
-          if (!stream || !stream.writable) {
-            resolve();
-            return;
-          }
-          const onError = (error) => {
-            stream.off("drain", onDrain);
-            reject(error);
-          };
-          const onDrain = () => {
-            stream.off("error", onError);
-            resolve();
-          };
-          stream.once("error", onError);
-          if (stream.write(frameBuffer)) {
-            stream.off("error", onError);
-            resolve();
-            return;
-          }
-          stream.once("drain", onDrain);
-        })
+  getError() {
+    return this.lastError;
+  }
+
+  isBackpressured() {
+    return (
+      this.videoQueuedBytes >= this.maxPendingVideoBytes ||
+      this.audioQueuedBytes >= this.maxPendingAudioBytes
     );
-    return this[pendingKey];
   }
 
-  writeVideo(frameBuffer) {
-    return this.writeToStream(this.videoIn, "videoPendingWrite", frameBuffer);
+  enqueueVideo(frameBuffer) {
+    return this.enqueueFrame("video", frameBuffer);
   }
 
-  writeAudio(frameBuffer) {
-    return this.writeToStream(this.audioIn, "audioPendingWrite", frameBuffer);
+  enqueueAudio(frameBuffer) {
+    return this.enqueueFrame("audio", frameBuffer);
+  }
+
+  enqueueFrame(kind, frameBuffer) {
+    if (!frameBuffer || frameBuffer.length === 0) {
+      return true;
+    }
+    if (this.closed) {
+      return false;
+    }
+
+    const queueKey = kind === "video" ? "videoQueue" : "audioQueue";
+    const bytesKey = kind === "video" ? "videoQueuedBytes" : "audioQueuedBytes";
+    const limit = kind === "video" ? this.maxPendingVideoBytes : this.maxPendingAudioBytes;
+
+    if (this[bytesKey] + frameBuffer.length > limit) {
+      return false;
+    }
+
+    this[queueKey].push(frameBuffer);
+    this[bytesKey] += frameBuffer.length;
+    this.drainQueue(kind);
+    return true;
+  }
+
+  drainQueue(kind) {
+    const stream = kind === "video" ? this.videoIn : this.audioIn;
+    const queueKey = kind === "video" ? "videoQueue" : "audioQueue";
+    const bytesKey = kind === "video" ? "videoQueuedBytes" : "audioQueuedBytes";
+    const drainingKey = kind === "video" ? "videoDraining" : "audioDraining";
+
+    if (this[drainingKey]) {
+      return;
+    }
+    this[drainingKey] = true;
+
+    const resume = () => {
+      stream.off("error", fail);
+      this[drainingKey] = false;
+      this.drainQueue(kind);
+    };
+
+    const fail = (error) => {
+      stream.off("drain", resume);
+      this.lastError = error;
+      this.closed = true;
+      this[drainingKey] = false;
+      this[queueKey].length = 0;
+      this[bytesKey] = 0;
+    };
+
+    if (!stream || !stream.writable || this.closed) {
+      fail(this.lastError || new Error(`FFmpeg ${kind} 输入流不可写`));
+      return;
+    }
+
+    try {
+      while (this[queueKey].length > 0) {
+        const frameBuffer = this[queueKey][0];
+        const writable = stream.write(frameBuffer);
+        this[queueKey].shift();
+        this[bytesKey] -= frameBuffer.length;
+        if (!writable) {
+          stream.once("drain", resume);
+          stream.once("error", fail);
+          return;
+        }
+      }
+      this[drainingKey] = false;
+    } catch (error) {
+      fail(error);
+    }
   }
 
   close() {
+    this.closed = true;
     if (this.videoIn && this.videoIn.writable) {
       this.videoIn.end();
     }
@@ -250,6 +347,10 @@ class CameraWasmDecoder {
     this.maxFrames = options.maxFrames ? Number(options.maxFrames) : 0;
     this.outputPath = options.outputPath || "";
     this.quiet = Boolean(options.quiet);
+    this.maxPendingVideoBytes = Number(options.maxPendingVideoBytes || 8 * 1024 * 1024);
+    this.maxPendingAudioBytes = Number(options.maxPendingAudioBytes || 2 * 1024 * 1024);
+    this.maxPendingInputBytes = Number(options.maxPendingInputBytes || 4 * this.chunkSize);
+    this.queuedInputBytes = 0;
     this.audioSampleFormat = null;
     this.audioChannels = 0;
     this.audioSampleRate = 0;
@@ -275,6 +376,8 @@ class CameraWasmDecoder {
           audioSampleFormat: this.audioSampleFormat,
           outputPath: this.outputPath,
           quiet: this.quiet,
+          maxPendingVideoBytes: this.maxPendingVideoBytes,
+          maxPendingAudioBytes: this.maxPendingAudioBytes,
         });
         if (!this.outputPath && this.ffmpegMuxer.stdout) {
           this.ffmpegMuxer.stdout.pipe(process.stdout);
@@ -283,10 +386,11 @@ class CameraWasmDecoder {
       }
       this.videoFrames += 1;
       const frame = transHeapBuffer(this.module, ptr, size);
-      this.ffmpegMuxer.writeVideo(frame).catch((error) => {
-        log(`写入 FFmpeg 失败: ${error.message}`, this.quiet);
+      if (!this.ffmpegMuxer.enqueueVideo(frame)) {
+        const error = this.ffmpegMuxer.getError();
+        log(`视频写入背压过高，暂停解码: ${error ? error.message : "视频队列已满"}`, this.quiet);
         this.ended = true;
-      });
+      }
       if (this.maxFrames && this.videoFrames >= this.maxFrames) {
         this.ended = true;
       }
@@ -298,10 +402,11 @@ class CameraWasmDecoder {
       this.audioFrames += 1;
       if (this.ffmpegMuxer && this.audioSampleFormat) {
         const frame = transHeapBuffer(this.module, ptr, size);
-        this.ffmpegMuxer.writeAudio(frame).catch((error) => {
-          log(`写入音频到 FFmpeg 失败: ${error.message}`, this.quiet);
+        if (!this.ffmpegMuxer.enqueueAudio(frame)) {
+          const error = this.ffmpegMuxer.getError();
+          log(`音频写入背压过高，暂停解码: ${error ? error.message : "音频队列已满"}`, this.quiet);
           this.ended = true;
-        });
+        }
       }
       if (this.audioFrames <= 3) {
         log(`audio frame #${this.audioFrames} ts=${ts} duration=${duration} size=${size}`, this.quiet);
@@ -312,8 +417,18 @@ class CameraWasmDecoder {
 
   enqueue(chunk) {
     if (chunk && chunk.length) {
-      this.queue.push(Buffer.from(chunk));
+      const frame = Buffer.from(chunk);
+      this.queue.push(frame);
+      this.queuedInputBytes += frame.length;
     }
+  }
+
+  isInputBackpressured() {
+    return this.queuedInputBytes >= this.maxPendingInputBytes;
+  }
+
+  isBackpressured() {
+    return this.isInputBackpressured() || Boolean(this.ffmpegMuxer && this.ffmpegMuxer.isBackpressured());
   }
 
   flushInput() {
@@ -329,8 +444,10 @@ class CameraWasmDecoder {
       }
       this.inputSize += wrote;
       if (wrote === chunk.length) {
+        this.queuedInputBytes -= chunk.length;
         this.queue.shift();
       } else {
+        this.queuedInputBytes -= wrote;
         this.queue[0] = chunk.subarray(wrote);
         break;
       }
@@ -391,6 +508,15 @@ class CameraWasmDecoder {
       return;
     }
     for (let i = 0; i < maxIterations; i += 1) {
+      if (this.ffmpegMuxer) {
+        const muxerError = this.ffmpegMuxer.getError();
+        if (muxerError) {
+          throw muxerError;
+        }
+        if (this.ffmpegMuxer.isBackpressured()) {
+          return;
+        }
+      }
       const ret = this.module._decodeOnePacket();
       if (ret === 0) {
         continue;
@@ -480,6 +606,9 @@ async function main() {
     fps: args.fps || 12,
     outputPath: args.output || "",
     maxFrames: args["max-frames"] || 0,
+    maxPendingVideoBytes: args["max-pending-video-bytes"] || 8 * 1024 * 1024,
+    maxPendingAudioBytes: args["max-pending-audio-bytes"] || 2 * 1024 * 1024,
+    maxPendingInputBytes: args["max-pending-input-bytes"] || 2 * 1024 * 1024,
     quiet,
   });
   await decoder.init();
@@ -489,6 +618,12 @@ async function main() {
     : chunkFromFetch(args.url, chunkSize, quiet);
 
   for await (const chunk of source) {
+    while (decoder.isBackpressured() && !decoder.ended) {
+      decoder.flushInput();
+      decoder.maybeOpen();
+      decoder.pumpDecode(32);
+      await sleep(10);
+    }
     decoder.enqueue(chunk);
     decoder.flushInput();
     decoder.maybeOpen();
@@ -496,6 +631,13 @@ async function main() {
     if (decoder.ended) {
       break;
     }
+  }
+
+  while (!decoder.ended && (decoder.queue.length > 0 || decoder.isBackpressured())) {
+    decoder.flushInput();
+    decoder.maybeOpen();
+    decoder.pumpDecode(32);
+    await sleep(10);
   }
 
   decoder.finish();
