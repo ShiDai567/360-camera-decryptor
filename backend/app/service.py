@@ -94,24 +94,54 @@ class CameraBackendService:
                 return camera
         raise ConfigError(f"配置中未找到摄像机 SN: {sn}")
 
+    def _extract_auth_cookies(self, config: Dict[str, Any]) -> Dict[str, str]:
+        auth_cookies: Dict[str, str] = {}
+        cookie_config = config.get("cookie")
+
+        if isinstance(cookie_config, list):
+            for item in cookie_config:
+                if not isinstance(item, dict):
+                    continue
+                for key, value in item.items():
+                    key_text = str(key).strip()
+                    value_text = str(value or "").strip()
+                    if key_text and value_text:
+                        auth_cookies[key_text] = value_text
+            return auth_cookies
+
+        if isinstance(cookie_config, dict):
+            for key, value in cookie_config.items():
+                key_text = str(key).strip()
+                value_text = str(value or "").strip()
+                if key_text and value_text:
+                    auth_cookies[key_text] = value_text
+            return auth_cookies
+
+        if isinstance(cookie_config, str) and cookie_config.strip():
+            for item in cookie_config.split(";"):
+                item = item.strip()
+                if "=" not in item:
+                    continue
+                key, value = item.split("=", 1)
+                key_text = key.strip()
+                value_text = value.strip()
+                if key_text and value_text:
+                    auth_cookies[key_text] = value_text
+            return auth_cookies
+
+        for key in ("Q", "T", "jia_web_sid", "__NS_Q", "__NS_T", "__guid", "__DC_gid"):
+            value_text = str(config.get(key) or "").strip()
+            if value_text:
+                auth_cookies[key] = value_text
+        return auth_cookies
+
     def _build_api_client(self, config: Dict[str, Any]) -> CameraAPIRequest:
         api = CameraAPIRequest(verbose=False)
-        auth_cookies: Dict[str, str] = {}
-        cookie_list = config.get("cookie")
-        if isinstance(cookie_list, list):
-            for item in cookie_list:
-                if isinstance(item, dict):
-                    for key, value in item.items():
-                        auth_cookies[str(key).strip()] = str(value or "").strip()
+        auth_cookies = self._extract_auth_cookies(config)
+        required_fields = ["Q", "T", "jia_web_sid"]
+        missing = [name for name in required_fields if not auth_cookies.get(name)]
 
-        if not auth_cookies:
-            auth_cookies = {
-                "Q": (config.get("Q") or "").strip(),
-                "T": (config.get("T") or "").strip(),
-                "jia_web_sid": (config.get("jia_web_sid") or "").strip(),
-            }
-
-        if all(auth_cookies.values()):
+        if not missing:
             api.set_cookies(auth_cookies)
             return api
 
@@ -121,10 +151,8 @@ class CameraBackendService:
             api.set_cookie_from_string(cookie.strip())
             return api
 
-        required_fields = ["Q", "T", "jia_web_sid"]
-        missing = [name for name in required_fields if not auth_cookies.get(name)]
         raise ConfigError(
-            "config.yaml 中缺少认证字段，需填写 cookie 下的 Q、T、jia_web_sid"
+            "config.yaml 中缺少认证字段，请在 cookie 中填写 Q、T、jia_web_sid"
             if len(missing) == len(required_fields)
             else f"config.yaml 中缺少认证字段: {', '.join(missing)}"
         )
@@ -202,23 +230,21 @@ class CameraBackendService:
             upstream.close()
 
     def _fetch_from_remote(self, sn: str, camera: Dict[str, Any], api: CameraAPIRequest) -> Dict[str, Any]:
-        preferred_is_v2 = camera.get("api_version", "v2").lower() == "v2"
-        last_result: Dict[str, Any] = {"errorCode": -1, "errorMsg": "获取播放信息失败"}
-        for is_v2 in [preferred_is_v2, not preferred_is_v2]:
-            result = api.get_play_info_from_api(sn, is_v2=is_v2)
-            if result and result.get("errorCode") == 0:
-                result["api_version"] = "v2" if is_v2 else "v1"
-                return result
-            if result:
-                last_result = result
+        preferred_version = camera.get("api_version", "v2").lower()
+        result = api.fetch_play_info(sn, preferred_version=preferred_version)
+        if result and result.get("errorCode") == 0:
+            request_meta = result.get("request_meta", {})
+            result["api_version"] = request_meta.get("version", preferred_version)
+            return result
 
         app.logger.warning(
-            "play-info upstream failed for sn=%s camera=%s result=%s",
+            "play-info upstream failed for sn=%s camera=%s result=%s attempts=%s",
             sn,
             camera.get("name", ""),
-            last_result,
+            result,
+            result.get("request_attempts", []),
         )
-        return last_result
+        return result
 
     def get_play_info(self, sn: str, force_refresh: bool = False) -> Dict[str, Any]:
         now = time.time()
