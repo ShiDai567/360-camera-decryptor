@@ -11,7 +11,7 @@ import time
 import json
 import shutil
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any, Dict, Optional
 
 import requests
@@ -647,11 +647,25 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             cwd=str(ROOT_DIR),
         )
     except OSError as exc:
         return jsonify({"error": f"启动 Node 解密器失败: {exc}"}), 500
+
+    def log_stderr() -> None:
+        if proc.stderr is None:
+            return
+        try:
+            for raw_line in iter(proc.stderr.readline, b""):
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if line:
+                    app.logger.warning("decrypted-stream[%s/%s]: %s", config_id_int, sn, line)
+        finally:
+            if proc.stderr is not None:
+                proc.stderr.close()
+
+    Thread(target=log_stderr, daemon=True).start()
 
     def generate():
         try:
@@ -662,12 +676,15 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
                     break
                 yield chunk
         finally:
+            return_code = proc.poll()
             if proc.poll() is None:
                 proc.terminate()
                 try:
                     proc.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     proc.kill()
+            elif return_code not in (0, None):
+                app.logger.warning("decrypted-stream[%s/%s] exited with code %s", config_id_int, sn, return_code)
 
     return Response(stream_with_context(generate()), content_type="video/mp2t")
 

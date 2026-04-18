@@ -356,6 +356,8 @@ class CameraWasmDecoder {
     this.audioSampleRate = 0;
     this.videoWidth = 0;
     this.videoHeight = 0;
+    this.droppedVideoFrames = 0;
+    this.droppedAudioFrames = 0;
   }
 
   async init() {
@@ -388,8 +390,13 @@ class CameraWasmDecoder {
       const frame = transHeapBuffer(this.module, ptr, size);
       if (!this.ffmpegMuxer.enqueueVideo(frame)) {
         const error = this.ffmpegMuxer.getError();
-        log(`视频写入背压过高，暂停解码: ${error ? error.message : "视频队列已满"}`, this.quiet);
-        this.ended = true;
+        if (error) {
+          throw error;
+        }
+        this.droppedVideoFrames += 1;
+        if (this.droppedVideoFrames <= 3 || this.droppedVideoFrames % 30 === 0) {
+          log(`视频写入背压过高，已丢弃 ${this.droppedVideoFrames} 帧`, this.quiet);
+        }
       }
       if (this.maxFrames && this.videoFrames >= this.maxFrames) {
         this.ended = true;
@@ -404,8 +411,13 @@ class CameraWasmDecoder {
         const frame = transHeapBuffer(this.module, ptr, size);
         if (!this.ffmpegMuxer.enqueueAudio(frame)) {
           const error = this.ffmpegMuxer.getError();
-          log(`音频写入背压过高，暂停解码: ${error ? error.message : "音频队列已满"}`, this.quiet);
-          this.ended = true;
+          if (error) {
+            throw error;
+          }
+          this.droppedAudioFrames += 1;
+          if (this.droppedAudioFrames <= 3 || this.droppedAudioFrames % 60 === 0) {
+            log(`音频写入背压过高，已丢弃 ${this.droppedAudioFrames} 帧`, this.quiet);
+          }
         }
       }
       if (this.audioFrames <= 3) {
@@ -641,7 +653,10 @@ async function main() {
   }
 
   decoder.finish();
-  log(`decoder finished: videoFrames=${decoder.videoFrames} audioFrames=${decoder.audioFrames}`, quiet);
+  log(
+    `decoder finished: videoFrames=${decoder.videoFrames} audioFrames=${decoder.audioFrames} droppedVideoFrames=${decoder.droppedVideoFrames} droppedAudioFrames=${decoder.droppedAudioFrames}`,
+    quiet
+  );
 }
 
 main().catch((error) => {
