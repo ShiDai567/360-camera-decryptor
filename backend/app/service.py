@@ -74,6 +74,24 @@ class CameraBackendService:
         cache_dir.mkdir(parents=True, exist_ok=True)
         return cache_dir
 
+    def get_decrypt_stream_options(self) -> Dict[str, int]:
+        server_config = self.load_config().get("server", {})
+        defaults = {
+            "decrypt_network_chunk_size": 64 * 1024,
+            "decrypt_max_pending_input_bytes": 512 * 1024,
+            "decrypt_max_pending_video_bytes": 12 * 1024 * 1024,
+            "decrypt_max_pending_audio_bytes": 1024 * 1024,
+            "decrypt_ffmpeg_threads": 1,
+        }
+        options: Dict[str, int] = {}
+        for key, default in defaults.items():
+            raw_value = server_config.get(key, default)
+            try:
+                options[key] = max(1, int(raw_value))
+            except (TypeError, ValueError):
+                options[key] = default
+        return options
+
     def list_cameras(self) -> list[Dict[str, Any]]:
         config = self.load_config()
         return [
@@ -590,6 +608,7 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
 
     fps = (request.args.get("fps") or "12").strip()
     relay_sig = payload.get("relaySig") or ""
+    decrypt_options = service.get_decrypt_stream_options()
     
     # 根据 config_id 选择解密配置
     cmd = [
@@ -600,6 +619,16 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
         "--fps",
         fps,
         "--quiet",
+        "--network-chunk-size",
+        str(decrypt_options["decrypt_network_chunk_size"]),
+        "--max-pending-input-bytes",
+        str(decrypt_options["decrypt_max_pending_input_bytes"]),
+        "--max-pending-video-bytes",
+        str(decrypt_options["decrypt_max_pending_video_bytes"]),
+        "--max-pending-audio-bytes",
+        str(decrypt_options["decrypt_max_pending_audio_bytes"]),
+        "--ffmpeg-threads",
+        str(decrypt_options["decrypt_ffmpeg_threads"]),
     ]
     
     if config_id_int == 0:

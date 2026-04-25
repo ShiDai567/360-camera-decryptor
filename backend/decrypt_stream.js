@@ -123,6 +123,7 @@ class FfmpegTsMuxer {
     quiet,
     maxPendingVideoBytes,
     maxPendingAudioBytes,
+    ffmpegThreads,
   }) {
     const hasAudio = Boolean(audioChannels && audioSampleRate && audioSampleFormat);
     const audioInputArgs = hasAudio
@@ -154,7 +155,9 @@ class FfmpegTsMuxer {
       "-loglevel",
       "error",
       "-fflags",
-      "+genpts",
+      "+genpts+nobuffer",
+      "-flags",
+      "low_delay",
       "-f",
       "rawvideo",
       "-pix_fmt",
@@ -167,12 +170,16 @@ class FfmpegTsMuxer {
       "pipe:0",
       ...audioInputArgs,
       ...mapArgs,
+      "-threads",
+      String(Math.max(1, Number(ffmpegThreads || 1))),
       "-c:v",
       "libx264",
       "-preset",
       "veryfast",
       "-tune",
       "zerolatency",
+      "-x264-params",
+      "rc-lookahead=0:sync-lookahead=0",
       "-g",
       String(Math.max(1, fps * 2)),
       "-keyint_min",
@@ -350,6 +357,7 @@ class CameraWasmDecoder {
     this.maxPendingVideoBytes = Number(options.maxPendingVideoBytes || 8 * 1024 * 1024);
     this.maxPendingAudioBytes = Number(options.maxPendingAudioBytes || 2 * 1024 * 1024);
     this.maxPendingInputBytes = Number(options.maxPendingInputBytes || 4 * this.chunkSize);
+    this.ffmpegThreads = Number(options.ffmpegThreads || 1);
     this.queuedInputBytes = 0;
     this.audioSampleFormat = null;
     this.audioChannels = 0;
@@ -380,6 +388,7 @@ class CameraWasmDecoder {
           quiet: this.quiet,
           maxPendingVideoBytes: this.maxPendingVideoBytes,
           maxPendingAudioBytes: this.maxPendingAudioBytes,
+          ffmpegThreads: this.ffmpegThreads,
         });
         if (!this.outputPath && this.ffmpegMuxer.stdout) {
           this.ffmpegMuxer.stdout.pipe(process.stdout);
@@ -582,16 +591,15 @@ async function* chunkFromFetch(url, chunkSize, quiet) {
   if (!response.ok || !response.body) {
     throw new Error(`拉取视频流失败: HTTP ${response.status}`);
   }
-  let pending = Buffer.alloc(0);
   for await (const rawChunk of response.body) {
-    pending = Buffer.concat([pending, Buffer.from(rawChunk)]);
-    while (pending.length >= chunkSize) {
-      yield pending.subarray(0, chunkSize);
-      pending = pending.subarray(chunkSize);
+    const chunk = Buffer.from(rawChunk);
+    if (chunk.length <= chunkSize) {
+      yield chunk;
+      continue;
     }
-  }
-  if (pending.length > 0) {
-    yield pending;
+    for (let offset = 0; offset < chunk.length; offset += chunkSize) {
+      yield chunk.subarray(offset, Math.min(offset + chunkSize, chunk.length));
+    }
   }
 }
 
@@ -621,6 +629,7 @@ async function main() {
     maxPendingVideoBytes: args["max-pending-video-bytes"] || 8 * 1024 * 1024,
     maxPendingAudioBytes: args["max-pending-audio-bytes"] || 2 * 1024 * 1024,
     maxPendingInputBytes: args["max-pending-input-bytes"] || 2 * 1024 * 1024,
+    ffmpegThreads: args["ffmpeg-threads"] || 1,
     quiet,
   });
   await decoder.init();

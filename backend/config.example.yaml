@@ -34,3 +34,13 @@ server:
   # 部署在反向代理后面时，显式指定前端可访问的后端公网地址
   # 例如: "https://you.domain.com"
   public_base_url: ""
+  # Node 拉取上游流时的单次读取块大小；更小的值通常更省内存，但 CPU 开销会略高
+  decrypt_network_chunk_size: 65536
+  # Node 侧待送入解码器的输入缓存上限，超过后会暂停继续拉取上游
+  decrypt_max_pending_input_bytes: 524288
+  # Node -> ffmpeg 的视频待写入缓存上限，超过后会触发背压/丢帧保护
+  decrypt_max_pending_video_bytes: 12582912
+  # Node -> ffmpeg 的音频待写入缓存上限
+  decrypt_max_pending_audio_bytes: 1048576
+  # ffmpeg 编码线程数，内存紧张时建议保持 1
+  decrypt_ffmpeg_threads: 1

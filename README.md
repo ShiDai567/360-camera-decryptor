@@ -31,6 +31,19 @@ cd backend
 python server.py
 ```
 
+如果你在用 Python 拉 Node.js 解密流，并且 `ffmpeg` 转码时出现内存持续上涨，可以先从 `backend/data/config.yaml` 的 `server` 段调小这几个参数：
+
+```yaml
+server:
+  decrypt_network_chunk_size: 65536
+  decrypt_max_pending_input_bytes: 524288
+  decrypt_max_pending_video_bytes: 6291456
+  decrypt_max_pending_audio_bytes: 524288
+  decrypt_ffmpeg_threads: 1
+```
+
+这几个值会直接限制 Node 输入缓存、Node 到 `ffmpeg` 的待写入队列，以及 `ffmpeg` 编码线程数。机器内存比较紧时，优先把 `decrypt_ffmpeg_threads` 固定为 `1`，再继续下调 `decrypt_max_pending_video_bytes`。
+
 ## 接入 go2rtc
 
 后端现在可以直接生成 `go2rtc` 可用的配置片段：
