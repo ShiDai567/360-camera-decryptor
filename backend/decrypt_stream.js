@@ -330,6 +330,13 @@ class FfmpegTsMuxer {
       this.audioIn.end();
     }
   }
+
+  terminate(signalName = "SIGTERM") {
+    this.close();
+    if (this.process && !this.process.killed) {
+      this.process.kill(signalName);
+    }
+  }
 }
 
 class CameraWasmDecoder {
@@ -632,6 +639,7 @@ async function main() {
     ffmpegThreads: args["ffmpeg-threads"] || 1,
     quiet,
   });
+  activeDecoder = decoder;
   await decoder.init();
 
   const source = args["input-file"]
@@ -666,9 +674,26 @@ async function main() {
     `decoder finished: videoFrames=${decoder.videoFrames} audioFrames=${decoder.audioFrames} droppedVideoFrames=${decoder.droppedVideoFrames} droppedAudioFrames=${decoder.droppedAudioFrames}`,
     quiet
   );
+  activeDecoder = null;
 }
 
+let activeDecoder = null;
+
+function shutdown(signalName) {
+  if (activeDecoder && activeDecoder.ffmpegMuxer) {
+    activeDecoder.ffmpegMuxer.terminate(signalName);
+  }
+  process.exit(0);
+}
+
+process.once("SIGINT", () => shutdown("SIGINT"));
+process.once("SIGTERM", () => shutdown("SIGTERM"));
+
 main().catch((error) => {
+  if (activeDecoder && activeDecoder.ffmpegMuxer) {
+    activeDecoder.ffmpegMuxer.terminate("SIGTERM");
+  }
+  activeDecoder = null;
   process.stderr.write(`${error.stack || error.message}\n`);
   process.exit(1);
 });

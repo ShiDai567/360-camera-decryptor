@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import os
 import re
+import signal
 import subprocess
 import time
 import json
@@ -427,6 +428,38 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1, x_port=1)
 
 
+def terminate_process_tree(proc: subprocess.Popen[Any], label: str, timeout: float = 3.0) -> Optional[int]:
+    """尽量回收整个子进程树，避免 Node 退出后 ffmpeg 继续残留。"""
+    if proc.poll() is not None:
+        return proc.returncode
+
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return proc.poll()
+    except OSError as exc:
+        app.logger.warning("%s failed to send SIGTERM to process group: %s", label, exc)
+        proc.terminate()
+
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        app.logger.warning("%s did not exit after SIGTERM, sending SIGKILL", label)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        except OSError as exc:
+            app.logger.warning("%s failed to send SIGKILL to process group: %s", label, exc)
+            proc.kill()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            app.logger.warning("%s still running after SIGKILL", label)
+
+    return proc.poll()
+
+
 def add_cors_headers(response: Response) -> Response:
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -678,6 +711,7 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             cwd=str(ROOT_DIR),
+            start_new_session=True,
         )
     except OSError as exc:
         return jsonify({"error": f"启动 Node 解密器失败: {exc}"}), 500
@@ -705,14 +739,11 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
                     break
                 yield chunk
         finally:
-            return_code = proc.poll()
-            if proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-            elif return_code not in (0, None):
+            label = f"decrypted-stream[{config_id_int}/{sn}]"
+            return_code = terminate_process_tree(proc, label)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            if return_code not in (0, None):
                 app.logger.warning("decrypted-stream[%s/%s] exited with code %s", config_id_int, sn, return_code)
 
     return Response(stream_with_context(generate()), content_type="video/mp2t")
