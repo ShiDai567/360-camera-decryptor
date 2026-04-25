@@ -44,3 +44,5 @@ server:
   decrypt_max_pending_audio_bytes: 1048576
   # ffmpeg 编码线程数，内存紧张时建议保持 1
   decrypt_ffmpeg_threads: 1
+  # 没有观众后继续保留解密进程的秒数，避免播放器短时间重连时频繁拉起新进程
+  decrypt_idle_timeout_seconds: 10

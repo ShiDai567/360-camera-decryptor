@@ -11,8 +11,9 @@ import subprocess
 import time
 import json
 import shutil
+from queue import Empty, Full, Queue
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Lock, Thread, Timer
 from typing import Any, Dict, Optional
 
 import requests
@@ -83,6 +84,7 @@ class CameraBackendService:
             "decrypt_max_pending_video_bytes": 12 * 1024 * 1024,
             "decrypt_max_pending_audio_bytes": 1024 * 1024,
             "decrypt_ffmpeg_threads": 1,
+            "decrypt_idle_timeout_seconds": 10,
         }
         options: Dict[str, int] = {}
         for key, default in defaults.items():
@@ -460,6 +462,172 @@ def terminate_process_tree(proc: subprocess.Popen[Any], label: str, timeout: flo
     return proc.poll()
 
 
+class SharedDecryptSession:
+    """Share a single Node+ffmpeg decrypt pipeline across concurrent viewers."""
+
+    def __init__(self, key: str, proc: subprocess.Popen[Any], label: str, idle_timeout_seconds: int):
+        self.key = key
+        self.proc = proc
+        self.label = label
+        self.idle_timeout_seconds = max(1, idle_timeout_seconds)
+        self._lock = Lock()
+        self._subscribers: dict[int, Queue[Optional[bytes]]] = {}
+        self._next_subscriber_id = 0
+        self._idle_timer: Optional[Timer] = None
+        self._closed = False
+        self._return_code: Optional[int] = None
+        Thread(target=self._log_stderr, daemon=True).start()
+        Thread(target=self._fanout_stdout, daemon=True).start()
+
+    def subscribe(self) -> tuple[int, Queue[Optional[bytes]]]:
+        queue: Queue[Optional[bytes]] = Queue(maxsize=8)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("decrypt session already closed")
+            if self._idle_timer is not None:
+                self._idle_timer.cancel()
+                self._idle_timer = None
+            self._next_subscriber_id += 1
+            subscriber_id = self._next_subscriber_id
+            self._subscribers[subscriber_id] = queue
+        return subscriber_id, queue
+
+    def unsubscribe(self, subscriber_id: int) -> None:
+        should_schedule_idle = False
+        with self._lock:
+            queue = self._subscribers.pop(subscriber_id, None)
+            if queue is not None:
+                self._signal_queue_end(queue)
+            should_schedule_idle = not self._closed and not self._subscribers and self.proc.poll() is None
+            if should_schedule_idle and self._idle_timer is None:
+                self._idle_timer = Timer(self.idle_timeout_seconds, self._terminate_if_idle)
+                self._idle_timer.daemon = True
+                self._idle_timer.start()
+        if should_schedule_idle:
+            app.logger.info("%s has no subscribers, will stop after %ss idle timeout", self.label, self.idle_timeout_seconds)
+
+    def return_code(self) -> Optional[int]:
+        with self._lock:
+            return self._return_code
+
+    def is_closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def _log_stderr(self) -> None:
+        if proc_stderr := self.proc.stderr:
+            try:
+                for raw_line in iter(proc_stderr.readline, b""):
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line:
+                        app.logger.warning("%s: %s", self.label, line)
+            finally:
+                proc_stderr.close()
+
+    def _fanout_stdout(self) -> None:
+        try:
+            assert self.proc.stdout is not None
+            while True:
+                chunk = self.proc.stdout.read(64 * 1024)
+                if not chunk:
+                    break
+                self._publish_chunk(chunk)
+        finally:
+            if self.proc.stdout is not None:
+                self.proc.stdout.close()
+            return_code = terminate_process_tree(self.proc, self.label)
+            with self._lock:
+                self._close_locked(return_code)
+            if return_code not in (0, None):
+                app.logger.warning("%s exited with code %s", self.label, return_code)
+
+    def _publish_chunk(self, chunk: bytes) -> None:
+        stale_subscribers: list[int] = []
+        with self._lock:
+            items = list(self._subscribers.items())
+        for subscriber_id, queue in items:
+            try:
+                queue.put_nowait(chunk)
+            except Full:
+                stale_subscribers.append(subscriber_id)
+        for subscriber_id in stale_subscribers:
+            app.logger.warning("%s subscriber=%s is too slow, dropping it", self.label, subscriber_id)
+            self.unsubscribe(subscriber_id)
+
+    def _terminate_if_idle(self) -> None:
+        with self._lock:
+            self._idle_timer = None
+            if self._closed or self._subscribers or self.proc.poll() is not None:
+                return
+        app.logger.info("%s idle timeout reached, stopping decrypt process", self.label)
+        return_code = terminate_process_tree(self.proc, self.label)
+        with self._lock:
+            self._close_locked(return_code)
+
+    def _close_locked(self, return_code: Optional[int]) -> None:
+        if self._closed:
+            if return_code is not None and self._return_code is None:
+                self._return_code = return_code
+            return
+        self._closed = True
+        self._return_code = return_code
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+        subscribers = list(self._subscribers.values())
+        self._subscribers.clear()
+        for queue in subscribers:
+            self._signal_queue_end(queue)
+
+    @staticmethod
+    def _signal_queue_end(queue: Queue[Optional[bytes]]) -> None:
+        try:
+            queue.put_nowait(None)
+        except Full:
+            try:
+                queue.get_nowait()
+            except Empty:
+                pass
+            try:
+                queue.put_nowait(None)
+            except Full:
+                pass
+
+
+class SharedDecryptSessionManager:
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._sessions: dict[str, SharedDecryptSession] = {}
+
+    def get_or_create(
+        self,
+        key: str,
+        label: str,
+        idle_timeout_seconds: int,
+        cmd: list[str],
+    ) -> SharedDecryptSession:
+        with self._lock:
+            session = self._sessions.get(key)
+            if session and not session.is_closed() and session.proc.poll() is None:
+                return session
+            if session and (session.is_closed() or session.proc.poll() is not None):
+                self._sessions.pop(key, None)
+
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                cwd=str(ROOT_DIR),
+                start_new_session=True,
+            )
+            session = SharedDecryptSession(key, proc, label, idle_timeout_seconds)
+            self._sessions[key] = session
+            return session
+
+
+decrypt_session_manager = SharedDecryptSessionManager()
+
+
 def add_cors_headers(response: Response) -> Response:
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type"
@@ -631,118 +799,91 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
         flash_url = payload.get("flashUrl")
         if not flash_url:
             raise ConfigError("播放信息缺少 flashUrl，无法启动服务端解密")
+        if not NODE_DECRYPT_SCRIPT.is_file():
+            return jsonify({"error": f"缺少解密脚本: {NODE_DECRYPT_SCRIPT}"}), 500
+
+        fps = (request.args.get("fps") or "12").strip()
+        relay_sig = payload.get("relaySig") or ""
+        decrypt_options = service.get_decrypt_stream_options()
+
+        cmd = [
+            "node",
+            str(NODE_DECRYPT_SCRIPT),
+            "--url",
+            flash_url,
+            "--fps",
+            fps,
+            "--quiet",
+            "--network-chunk-size",
+            str(decrypt_options["decrypt_network_chunk_size"]),
+            "--max-pending-input-bytes",
+            str(decrypt_options["decrypt_max_pending_input_bytes"]),
+            "--max-pending-video-bytes",
+            str(decrypt_options["decrypt_max_pending_video_bytes"]),
+            "--max-pending-audio-bytes",
+            str(decrypt_options["decrypt_max_pending_audio_bytes"]),
+            "--ffmpeg-threads",
+            str(decrypt_options["decrypt_ffmpeg_threads"]),
+        ]
+
+        if config_id_int == 0:
+            if not play_key:
+                raise ConfigError("播放信息缺少 playKey，无法启动服务端解密")
+            cmd.extend(["--play-key", play_key, "--key-type", "0"])
+        elif config_id_int == 1:
+            if not play_key:
+                raise ConfigError("播放信息缺少 playKey，无法启动服务端解密")
+            cmd.extend(["--play-key", play_key, "--key-type", "1"])
+        elif config_id_int == 2:
+            cmd.extend(["--key-type", "0"])
+        elif config_id_int == 3:
+            if not play_key:
+                raise ConfigError("播放信息缺少 playKey，无法启动服务端解密")
+            cmd.extend(["--play-key", play_key, "--key-type", "0"])
+            if relay_sig:
+                cmd.extend(["--relay-sig", relay_sig])
+        else:
+            return jsonify({"error": f"不支持的 config_id: {config_id_int}，支持的配置ID为 0-3"}), 400
+
+        session_key = json.dumps(
+            {
+                "config_id": config_id_int,
+                "sn": sn,
+                "fps": fps,
+                "flash_url": flash_url,
+                "play_key": play_key or "",
+                "relay_sig": relay_sig if config_id_int == 3 else "",
+            },
+            sort_keys=True,
+            ensure_ascii=True,
+        )
+        label = f"decrypted-stream[{config_id_int}/{sn}]"
+        session = decrypt_session_manager.get_or_create(
+            key=session_key,
+            label=label,
+            idle_timeout_seconds=decrypt_options["decrypt_idle_timeout_seconds"],
+            cmd=cmd,
+        )
+        subscriber_id, subscriber_queue = session.subscribe()
     except ConfigError as exc:
         return jsonify({"error": str(exc)}), 400
     except ValueError:
         return jsonify({"error": "config_id 必须是整数"}), 400
-
-    if not NODE_DECRYPT_SCRIPT.is_file():
-        return jsonify({"error": f"缺少解密脚本: {NODE_DECRYPT_SCRIPT}"}), 500
-
-    fps = (request.args.get("fps") or "12").strip()
-    relay_sig = payload.get("relaySig") or ""
-    decrypt_options = service.get_decrypt_stream_options()
-    
-    # 根据 config_id 选择解密配置
-    cmd = [
-        "node",
-        str(NODE_DECRYPT_SCRIPT),
-        "--url",
-        flash_url,
-        "--fps",
-        fps,
-        "--quiet",
-        "--network-chunk-size",
-        str(decrypt_options["decrypt_network_chunk_size"]),
-        "--max-pending-input-bytes",
-        str(decrypt_options["decrypt_max_pending_input_bytes"]),
-        "--max-pending-video-bytes",
-        str(decrypt_options["decrypt_max_pending_video_bytes"]),
-        "--max-pending-audio-bytes",
-        str(decrypt_options["decrypt_max_pending_audio_bytes"]),
-        "--ffmpeg-threads",
-        str(decrypt_options["decrypt_ffmpeg_threads"]),
-    ]
-    
-    if config_id_int == 0:
-        # 配置0: 默认解密方式 - keyType=0, 使用playKey
-        if not play_key:
-            raise ConfigError("播放信息缺少 playKey，无法启动服务端解密")
-        cmd.extend([
-            "--play-key",
-            play_key,
-            "--key-type",
-            "0",
-        ])
-    elif config_id_int == 1:
-        # 配置1: 解密方式1 - keyType=1, 使用playKey
-        if not play_key:
-            raise ConfigError("播放信息缺少 playKey，无法启动服务端解密")
-        cmd.extend([
-            "--play-key",
-            play_key,
-            "--key-type",
-            "1",
-        ])
-    elif config_id_int == 2:
-        # 配置2: 不使用密钥 - keyType=0, key=null
-        cmd.extend([
-            "--key-type",
-            "0",
-        ])
-    elif config_id_int == 3:
-        # 配置3: 使用中继签名 - keyType=0, 使用relaySig作为keyForKey
-        if not play_key:
-            raise ConfigError("播放信息缺少 playKey，无法启动服务端解密")
-        cmd.extend([
-            "--play-key",
-            play_key,
-            "--key-type",
-            "0",
-        ])
-        if relay_sig:
-            cmd.extend(["--relay-sig", relay_sig])
-    else:
-        return jsonify({"error": f"不支持的 config_id: {config_id_int}，支持的配置ID为 0-3"}), 400
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(ROOT_DIR),
-            start_new_session=True,
-        )
     except OSError as exc:
         return jsonify({"error": f"启动 Node 解密器失败: {exc}"}), 500
-
-    def log_stderr() -> None:
-        if proc.stderr is None:
-            return
-        try:
-            for raw_line in iter(proc.stderr.readline, b""):
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if line:
-                    app.logger.warning("decrypted-stream[%s/%s]: %s", config_id_int, sn, line)
-        finally:
-            if proc.stderr is not None:
-                proc.stderr.close()
-
-    Thread(target=log_stderr, daemon=True).start()
+    except RuntimeError as exc:
+        return jsonify({"error": f"解密流会话不可用: {exc}"}), 503
 
     def generate():
         try:
-            assert proc.stdout is not None
             while True:
-                chunk = proc.stdout.read(64 * 1024)
-                if not chunk:
+                chunk = subscriber_queue.get()
+                if chunk is None:
                     break
                 yield chunk
         finally:
-            label = f"decrypted-stream[{config_id_int}/{sn}]"
-            return_code = terminate_process_tree(proc, label)
-            if proc.stdout is not None:
-                proc.stdout.close()
+            session.unsubscribe(subscriber_id)
+            return_code = session.return_code()
             if return_code not in (0, None):
                 app.logger.warning("decrypted-stream[%s/%s] exited with code %s", config_id_int, sn, return_code)
 
