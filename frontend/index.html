@@ -231,6 +231,20 @@
                     </div>
                 </div>
                 <div id="video-container"></div>
+                <div class="backend-player-test">
+                    <div class="backend-player-toolbar">
+                        <div>
+                            <h3>后端解密流测试</h3>
+                            <span id="backend-player-status">未启动</span>
+                        </div>
+                        <div class="button-group compact-buttons">
+                            <button onclick="testBackendDecryptedStream(false)">后端解密播放</button>
+                            <button class="secondary" onclick="testBackendDecryptedStream(true)">刷新重试</button>
+                            <button class="secondary" onclick="stopBackendDecryptedStream()">停止后端流</button>
+                        </div>
+                    </div>
+                    <video id="backend-decrypted-video" controls muted playsinline></video>
+                </div>
                 <div class="button-group" style="margin-top: 20px;">
                     <button class="secondary" onclick="stopAllTests()">⏹️ 停止播放</button>
                     <button class="secondary" onclick="clearLogs()">🗑️ 清空日志</button>

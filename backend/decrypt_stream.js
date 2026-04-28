@@ -120,6 +120,7 @@ class FfmpegTsMuxer {
     audioSampleRate,
     audioSampleFormat,
     outputPath,
+    outputFormat,
     quiet,
     maxPendingVideoBytes,
     maxPendingAudioBytes,
@@ -151,6 +152,17 @@ class FfmpegTsMuxer {
           String(audioSampleRate),
         ]
       : ["-an"];
+    const normalizedOutputFormat = outputFormat === "mp4" ? "mp4" : "mpegts";
+    const outputArgs = normalizedOutputFormat === "mp4"
+      ? [
+          "-movflags",
+          "frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset",
+          "-frag_duration",
+          "1000000",
+          "-f",
+          "mp4",
+        ]
+      : ["-f", "mpegts"];
     const ffmpegArgs = [
       "-loglevel",
       "error",
@@ -174,6 +186,10 @@ class FfmpegTsMuxer {
       String(Math.max(1, Number(ffmpegThreads || 1))),
       "-c:v",
       "libx264",
+      "-profile:v",
+      "baseline",
+      "-level",
+      "3.1",
       "-preset",
       "veryfast",
       "-tune",
@@ -189,8 +205,7 @@ class FfmpegTsMuxer {
       ...audioOutputArgs,
       "-pix_fmt",
       "yuv420p",
-      "-f",
-      "mpegts",
+      ...outputArgs,
       outputPath || "pipe:1",
     ];
 
@@ -392,6 +407,7 @@ class CameraWasmDecoder {
           audioSampleRate: this.audioSampleRate,
           audioSampleFormat: this.audioSampleFormat,
           outputPath: this.outputPath,
+          outputFormat: this.options.outputFormat,
           quiet: this.quiet,
           maxPendingVideoBytes: this.maxPendingVideoBytes,
           maxPendingAudioBytes: this.maxPendingAudioBytes,
@@ -632,6 +648,7 @@ async function main() {
     keyType: args["key-type"] || 0,
     fps: args.fps || 12,
     outputPath: args.output || "",
+    outputFormat: args["output-format"] || "mpegts",
     maxFrames: args["max-frames"] || 0,
     maxPendingVideoBytes: args["max-pending-video-bytes"] || 8 * 1024 * 1024,
     maxPendingAudioBytes: args["max-pending-audio-bytes"] || 2 * 1024 * 1024,

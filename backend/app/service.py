@@ -6,14 +6,11 @@ from __future__ import annotations
 
 import os
 import re
-import signal
-import subprocess
 import time
 import json
 import shutil
-from queue import Empty, Full, Queue
 from pathlib import Path
-from threading import Lock, Thread, Timer
+from threading import Lock
 from typing import Any, Dict, Optional
 
 import requests
@@ -22,20 +19,17 @@ from flask import Flask, Response, jsonify, request, send_from_directory, stream
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from .api_client import CameraAPIRequest
-
-
-ROOT_DIR = Path(__file__).resolve().parents[2]
-BACKEND_DIR = ROOT_DIR / "backend"
-WEB_DIR = ROOT_DIR / "frontend"
-NODE_DECRYPT_SCRIPT = BACKEND_DIR / "decrypt_stream.js"
-
-
-class ConfigError(RuntimeError):
-    """配置错误"""
+from .paths import BACKEND_DIR, NODE_DECRYPT_SCRIPT, ROOT_DIR, WEB_DIR, ConfigError
+from .stream_sessions import SharedDecryptSessionManager
 
 
 class CameraBackendService:
-    """封装配置读取、播放信息获取、批量保存与缓存。"""
+    """摄像机播放信息服务。
+
+    这一层只负责“配置、认证、播放信息、缓存、go2rtc 配置生成”等业务逻辑，
+    不直接关心 Flask 请求对象，也不直接管理 Node/ffmpeg 子进程。这样路由层、
+    流进程层和业务层边界更清楚，后面排查问题时不会一团混在一起。
+    """
 
     def __init__(self, config_path: Optional[str] = None):
         self.data_dir = BACKEND_DIR / "data"
@@ -50,6 +44,7 @@ class CameraBackendService:
         self._lock = Lock()
 
     def ensure_config_file(self) -> None:
+        """确保运行配置存在；首次启动时从模板复制一份。"""
         if self.config_path.exists():
             return
         if self.config_path == self.data_dir / "config.yaml" and self.example_config_path.exists():
@@ -58,6 +53,11 @@ class CameraBackendService:
             return
 
     def load_config(self) -> Dict[str, Any]:
+        """读取 YAML 配置。
+
+        这里每次读取文件，便于用户修改 config.yaml 后刷新页面立即生效；如果后续
+        配置变大，再考虑加文件 mtime 缓存。
+        """
         self.ensure_config_file()
         if not self.config_path.exists():
             raise ConfigError(f"配置文件不存在: {self.config_path}")
@@ -77,6 +77,11 @@ class CameraBackendService:
         return cache_dir
 
     def get_decrypt_stream_options(self) -> Dict[str, int]:
+        """读取服务端解密管线的限流/超时配置。
+
+        这些参数会传给 Node 解密器，用来控制网络读取、输入队列、ffmpeg 队列和
+        空闲回收时间，避免失败流无限吃 CPU/内存。
+        """
         server_config = self.load_config().get("server", {})
         defaults = {
             "decrypt_network_chunk_size": 64 * 1024,
@@ -96,6 +101,7 @@ class CameraBackendService:
         return options
 
     def list_cameras(self) -> list[Dict[str, Any]]:
+        """返回前端展示所需的摄像机列表，不暴露 Cookie 等敏感配置。"""
         config = self.load_config()
         return [
             {
@@ -116,6 +122,7 @@ class CameraBackendService:
         raise ConfigError(f"配置中未找到摄像机 SN: {sn}")
 
     def _extract_auth_cookies(self, config: Dict[str, Any]) -> Dict[str, str]:
+        """兼容多种 Cookie 写法，统一整理成 requests 可使用的字典。"""
         auth_cookies: Dict[str, str] = {}
         cookie_config = config.get("cookie")
 
@@ -157,6 +164,7 @@ class CameraBackendService:
         return auth_cookies
 
     def _build_api_client(self, config: Dict[str, Any]) -> CameraAPIRequest:
+        """根据配置创建 360 API 客户端，并校验必要认证字段。"""
         api = CameraAPIRequest(verbose=False)
         auth_cookies = self._extract_auth_cookies(config)
         required_fields = ["Q", "T", "jia_web_sid"]
@@ -180,10 +188,12 @@ class CameraBackendService:
         return api
 
     def _get_cache_file_path(self, sn: str) -> Path:
+        """把摄像机 SN 转成安全文件名，避免特殊字符逃出缓存目录。"""
         safe_sn = re.sub(r"[^a-zA-Z0-9_.-]+", "_", sn).strip("_") or "unknown"
         return self.get_play_info_cache_dir() / f"{safe_sn}.json"
 
     def _load_persisted_play_info(self, sn: str) -> Optional[Dict[str, Any]]:
+        """读取磁盘播放信息缓存；失败时只记录日志，不中断主流程。"""
         cache_file = self._get_cache_file_path(sn)
         if not cache_file.exists():
             return None
@@ -199,6 +209,7 @@ class CameraBackendService:
         return payload
 
     def _save_persisted_play_info(self, sn: str, payload: Dict[str, Any]) -> None:
+        """原子写入播放信息缓存，降低写到一半时文件损坏的概率。"""
         cache_file = self._get_cache_file_path(sn)
         tmp_file = cache_file.with_suffix(".json.tmp")
         try:
@@ -214,6 +225,7 @@ class CameraBackendService:
                 pass
 
     def _remember_play_info(self, sn: str, payload: Dict[str, Any], cached_at: Optional[float] = None) -> Dict[str, Any]:
+        """同时更新内存缓存与磁盘缓存。"""
         normalized_payload = dict(payload)
         cache_time = cached_at if cached_at is not None else time.time()
         with self._lock:
@@ -232,6 +244,7 @@ class CameraBackendService:
         }
 
     def _can_open_stream(self, payload: Dict[str, Any]) -> bool:
+        """探测缓存里的 flashUrl 是否仍可打开，过期时触发强制刷新。"""
         flash_url = (payload or {}).get("flashUrl")
         if not flash_url:
             return False
@@ -268,6 +281,7 @@ class CameraBackendService:
         return result
 
     def get_play_info(self, sn: str, force_refresh: bool = False) -> Dict[str, Any]:
+        """获取播放信息，优先使用短期内存缓存和长期磁盘缓存。"""
         now = time.time()
         cache_ttl = int(self.load_config().get("server", {}).get("play_info_cache_seconds", 30))
 
@@ -428,204 +442,7 @@ class CameraBackendService:
 service = CameraBackendService(os.environ.get("CAMERA_CONFIG_PATH"))
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1, x_port=1)
-
-
-def terminate_process_tree(proc: subprocess.Popen[Any], label: str, timeout: float = 3.0) -> Optional[int]:
-    """尽量回收整个子进程树，避免 Node 退出后 ffmpeg 继续残留。"""
-    if proc.poll() is not None:
-        return proc.returncode
-
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        return proc.poll()
-    except OSError as exc:
-        app.logger.warning("%s failed to send SIGTERM to process group: %s", label, exc)
-        proc.terminate()
-
-    try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        app.logger.warning("%s did not exit after SIGTERM, sending SIGKILL", label)
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        except OSError as exc:
-            app.logger.warning("%s failed to send SIGKILL to process group: %s", label, exc)
-            proc.kill()
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            app.logger.warning("%s still running after SIGKILL", label)
-
-    return proc.poll()
-
-
-class SharedDecryptSession:
-    """Share a single Node+ffmpeg decrypt pipeline across concurrent viewers."""
-
-    def __init__(self, key: str, proc: subprocess.Popen[Any], label: str, idle_timeout_seconds: int):
-        self.key = key
-        self.proc = proc
-        self.label = label
-        self.idle_timeout_seconds = max(1, idle_timeout_seconds)
-        self._lock = Lock()
-        self._subscribers: dict[int, Queue[Optional[bytes]]] = {}
-        self._next_subscriber_id = 0
-        self._idle_timer: Optional[Timer] = None
-        self._closed = False
-        self._return_code: Optional[int] = None
-        Thread(target=self._log_stderr, daemon=True).start()
-        Thread(target=self._fanout_stdout, daemon=True).start()
-
-    def subscribe(self) -> tuple[int, Queue[Optional[bytes]]]:
-        queue: Queue[Optional[bytes]] = Queue(maxsize=8)
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("decrypt session already closed")
-            if self._idle_timer is not None:
-                self._idle_timer.cancel()
-                self._idle_timer = None
-            self._next_subscriber_id += 1
-            subscriber_id = self._next_subscriber_id
-            self._subscribers[subscriber_id] = queue
-        return subscriber_id, queue
-
-    def unsubscribe(self, subscriber_id: int) -> None:
-        should_schedule_idle = False
-        with self._lock:
-            queue = self._subscribers.pop(subscriber_id, None)
-            if queue is not None:
-                self._signal_queue_end(queue)
-            should_schedule_idle = not self._closed and not self._subscribers and self.proc.poll() is None
-            if should_schedule_idle and self._idle_timer is None:
-                self._idle_timer = Timer(self.idle_timeout_seconds, self._terminate_if_idle)
-                self._idle_timer.daemon = True
-                self._idle_timer.start()
-        if should_schedule_idle:
-            app.logger.info("%s has no subscribers, will stop after %ss idle timeout", self.label, self.idle_timeout_seconds)
-
-    def return_code(self) -> Optional[int]:
-        with self._lock:
-            return self._return_code
-
-    def is_closed(self) -> bool:
-        with self._lock:
-            return self._closed
-
-    def _log_stderr(self) -> None:
-        if proc_stderr := self.proc.stderr:
-            try:
-                for raw_line in iter(proc_stderr.readline, b""):
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if line:
-                        app.logger.warning("%s: %s", self.label, line)
-            finally:
-                proc_stderr.close()
-
-    def _fanout_stdout(self) -> None:
-        try:
-            assert self.proc.stdout is not None
-            while True:
-                chunk = self.proc.stdout.read(64 * 1024)
-                if not chunk:
-                    break
-                self._publish_chunk(chunk)
-        finally:
-            if self.proc.stdout is not None:
-                self.proc.stdout.close()
-            return_code = terminate_process_tree(self.proc, self.label)
-            with self._lock:
-                self._close_locked(return_code)
-            if return_code not in (0, None):
-                app.logger.warning("%s exited with code %s", self.label, return_code)
-
-    def _publish_chunk(self, chunk: bytes) -> None:
-        stale_subscribers: list[int] = []
-        with self._lock:
-            items = list(self._subscribers.items())
-        for subscriber_id, queue in items:
-            try:
-                queue.put_nowait(chunk)
-            except Full:
-                stale_subscribers.append(subscriber_id)
-        for subscriber_id in stale_subscribers:
-            app.logger.warning("%s subscriber=%s is too slow, dropping it", self.label, subscriber_id)
-            self.unsubscribe(subscriber_id)
-
-    def _terminate_if_idle(self) -> None:
-        with self._lock:
-            self._idle_timer = None
-            if self._closed or self._subscribers or self.proc.poll() is not None:
-                return
-        app.logger.info("%s idle timeout reached, stopping decrypt process", self.label)
-        return_code = terminate_process_tree(self.proc, self.label)
-        with self._lock:
-            self._close_locked(return_code)
-
-    def _close_locked(self, return_code: Optional[int]) -> None:
-        if self._closed:
-            if return_code is not None and self._return_code is None:
-                self._return_code = return_code
-            return
-        self._closed = True
-        self._return_code = return_code
-        if self._idle_timer is not None:
-            self._idle_timer.cancel()
-            self._idle_timer = None
-        subscribers = list(self._subscribers.values())
-        self._subscribers.clear()
-        for queue in subscribers:
-            self._signal_queue_end(queue)
-
-    @staticmethod
-    def _signal_queue_end(queue: Queue[Optional[bytes]]) -> None:
-        try:
-            queue.put_nowait(None)
-        except Full:
-            try:
-                queue.get_nowait()
-            except Empty:
-                pass
-            try:
-                queue.put_nowait(None)
-            except Full:
-                pass
-
-
-class SharedDecryptSessionManager:
-    def __init__(self) -> None:
-        self._lock = Lock()
-        self._sessions: dict[str, SharedDecryptSession] = {}
-
-    def get_or_create(
-        self,
-        key: str,
-        label: str,
-        idle_timeout_seconds: int,
-        cmd: list[str],
-    ) -> SharedDecryptSession:
-        with self._lock:
-            session = self._sessions.get(key)
-            if session and not session.is_closed() and session.proc.poll() is None:
-                return session
-            if session and (session.is_closed() or session.proc.poll() is not None):
-                self._sessions.pop(key, None)
-
-            proc = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(ROOT_DIR),
-                start_new_session=True,
-            )
-            session = SharedDecryptSession(key, proc, label, idle_timeout_seconds)
-            self._sessions[key] = session
-            return session
-
-
-decrypt_session_manager = SharedDecryptSessionManager()
+decrypt_session_manager = SharedDecryptSessionManager(logger=app.logger, cwd=ROOT_DIR)
 
 
 def add_cors_headers(response: Response) -> Response:
@@ -648,6 +465,11 @@ def get_public_base_url() -> str:
 
 def build_go2rtc_response(sn: Optional[str] = None, mode: str = "raw", config_id: int = 0) -> Dict[str, Any]:
     return service.build_go2rtc_config(get_public_base_url(), sn=sn, mode=mode, config_id=config_id)
+
+
+def build_decrypt_group_key(config_id: int, sn: str) -> str:
+    """同一摄像机和同一解密配置共用一个进程组标识。"""
+    return json.dumps({"config_id": config_id, "sn": sn}, sort_keys=True, ensure_ascii=True)
 
 
 @app.after_request
@@ -689,8 +511,9 @@ def play_info() -> Response:
     payload["sourceFlashUrl"] = payload.get("flashUrl")
     payload["flashUrl"] = f"{get_public_base_url()}/api/stream/{sn}"
     payload["proxyMode"] = "stream_proxy"
-    payload["backendDecryptReady"] = False
-    payload["backendDecryptNote"] = "当前版本通过后端代理视频流规避浏览器 CORS，后续可在此出口接入真正服务端解密。"
+    payload["backendDecryptReady"] = True
+    payload["backendDecryptUrl"] = f"{get_public_base_url()}/api/decrypted-stream/0/{sn}"
+    payload["backendDecryptNote"] = "后端已支持 Node+ffmpeg 服务端解密流，前端可直接测试 MPEG-TS 输出。"
     return jsonify(payload)
 
 
@@ -792,7 +615,11 @@ def go2rtc_stream(sn: str) -> Response:
 def decrypted_stream(config_id: str, sn: str) -> Response:
     try:
         config_id_int = int(config_id)
-        payload = service.get_play_info_for_stream(sn, force_refresh=request.args.get("refresh") == "1")
+        force_refresh = request.args.get("refresh") == "1"
+        # 前端失败后重试会带 refresh=1，此时必须替换同摄像机/配置的旧进程，
+        # 否则旧 Node/ffmpeg 可能继续消耗 CPU 和内存。
+        replace_group = force_refresh or request.args.get("replace") == "1"
+        payload = service.get_play_info_for_stream(sn, force_refresh=force_refresh)
         if payload.get("errorCode") != 0:
             raise ConfigError(payload.get("errorMsg", "未获取到播放信息"))
         play_key = payload.get("playKey")
@@ -803,6 +630,9 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
             return jsonify({"error": f"缺少解密脚本: {NODE_DECRYPT_SCRIPT}"}), 500
 
         fps = (request.args.get("fps") or "12").strip()
+        output_format = (request.args.get("format") or "mpegts").strip().lower()
+        if output_format not in {"mpegts", "mp4"}:
+            return jsonify({"error": "format 仅支持 mpegts 或 mp4"}), 400
         relay_sig = payload.get("relaySig") or ""
         decrypt_options = service.get_decrypt_stream_options()
 
@@ -824,6 +654,8 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
             str(decrypt_options["decrypt_max_pending_audio_bytes"]),
             "--ffmpeg-threads",
             str(decrypt_options["decrypt_ffmpeg_threads"]),
+            "--output-format",
+            output_format,
         ]
 
         if config_id_int == 0:
@@ -850,6 +682,7 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
                 "config_id": config_id_int,
                 "sn": sn,
                 "fps": fps,
+                "output_format": output_format,
                 "flash_url": flash_url,
                 "play_key": play_key or "",
                 "relay_sig": relay_sig if config_id_int == 3 else "",
@@ -857,12 +690,15 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
             sort_keys=True,
             ensure_ascii=True,
         )
+        group_key = build_decrypt_group_key(config_id_int, sn)
         label = f"decrypted-stream[{config_id_int}/{sn}]"
         session = decrypt_session_manager.get_or_create(
             key=session_key,
+            group_key=group_key,
             label=label,
             idle_timeout_seconds=decrypt_options["decrypt_idle_timeout_seconds"],
             cmd=cmd,
+            replace_group=replace_group,
         )
         subscriber_id, subscriber_queue = session.subscribe()
     except ConfigError as exc:
@@ -887,7 +723,23 @@ def decrypted_stream(config_id: str, sn: str) -> Response:
             if return_code not in (0, None):
                 app.logger.warning("decrypted-stream[%s/%s] exited with code %s", config_id_int, sn, return_code)
 
-    return Response(stream_with_context(generate()), content_type="video/mp2t")
+    content_type = "video/mp4" if output_format == "mp4" else "video/mp2t"
+    return Response(stream_with_context(generate()), content_type=content_type)
+
+
+@app.route("/api/decrypted-stream/<config_id>/<sn>/stop", methods=["POST"])
+def stop_decrypted_stream(config_id: str, sn: str) -> Response:
+    """前端显式停止后端解密进程，避免只停播放器但后端继续跑。"""
+    try:
+        config_id_int = int(config_id)
+    except ValueError:
+        return jsonify({"error": "config_id 必须是整数"}), 400
+
+    closed = decrypt_session_manager.close_group(
+        build_decrypt_group_key(config_id_int, sn),
+        reason="stopped by frontend",
+    )
+    return jsonify({"ok": True, "closed": closed})
 
 
 @app.route("/")

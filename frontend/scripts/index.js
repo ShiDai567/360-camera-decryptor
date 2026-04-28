@@ -3,6 +3,10 @@ let apiResponse = null;
 let currentPlayer = null;
 let currentConfigId = null;
 let go2rtcConfig = null;
+let backendStreamConfigId = null;
+let backendStreamSn = '';
+let backendStreamAbortController = null;
+let backendStreamObjectUrl = '';
 
 function getDefaultBackendBaseUrl() {
     if (window.location.protocol === 'http:' || window.location.protocol === 'https:') {
@@ -323,6 +327,13 @@ function updateStatus(status) {
     document.getElementById('player-status').textContent = status;
 }
 
+function updateBackendPlayerStatus(status) {
+    const statusEl = document.getElementById('backend-player-status');
+    if (statusEl) {
+        statusEl.textContent = status;
+    }
+}
+
 // ==================== 更新当前配置显示 ====================
 function updateCurrentConfig(config) {
     document.getElementById('current-config').textContent = config.name;
@@ -343,6 +354,192 @@ function stopCurrentPlayer() {
         }
         currentPlayer = null;
     }
+}
+
+function buildBackendDecryptedStreamUrl(configId, sn, refresh = false) {
+    const query = new URLSearchParams({
+        fps: '12',
+        format: 'mp4',
+        t: String(Date.now())
+    });
+    if (refresh) {
+        query.set('refresh', '1');
+        query.set('replace', '1');
+    }
+    return buildApiUrl(`/api/decrypted-stream/${encodeURIComponent(configId)}/${encodeURIComponent(sn)}?${query.toString()}`);
+}
+
+async function stopBackendDecryptedStream() {
+    const video = document.getElementById('backend-decrypted-video');
+    const sn = backendStreamSn || getCurrentCameraSn();
+    const configId = backendStreamConfigId !== null ? backendStreamConfigId : (currentConfigId !== null ? currentConfigId : 0);
+
+    if (backendStreamAbortController) {
+        backendStreamAbortController.abort();
+        backendStreamAbortController = null;
+    }
+    if (video) {
+        video.pause();
+        video.removeAttribute('src');
+        video.load();
+    }
+    if (backendStreamObjectUrl) {
+        URL.revokeObjectURL(backendStreamObjectUrl);
+        backendStreamObjectUrl = '';
+    }
+
+    if (!sn) {
+        updateBackendPlayerStatus('已停止');
+        return;
+    }
+
+    try {
+        const response = await fetch(buildApiUrl(`/api/decrypted-stream/${encodeURIComponent(configId)}/${encodeURIComponent(sn)}/stop`), {
+            method: 'POST'
+        });
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || result.error) {
+            throw new Error(result.error || '停止后端解密流失败');
+        }
+        log(result.closed ? '后端解密流进程已停止' : '后端没有正在运行的解密流', 'success');
+    } catch (error) {
+        log(`停止后端解密流失败: ${error.message}`, 'error');
+    } finally {
+        backendStreamConfigId = null;
+        backendStreamSn = '';
+        updateBackendPlayerStatus('已停止');
+    }
+}
+
+async function testBackendDecryptedStream(refresh = false) {
+    if (!apiResponse) {
+        log('请先获取或解析播放信息', 'error');
+        alert('请先获取或解析播放信息');
+        return;
+    }
+
+    const sn = getCurrentCameraSn();
+    if (!sn) {
+        log('缺少摄像机 SN，无法启动后端解密流', 'error');
+        return;
+    }
+
+    const configId = currentConfigId !== null ? currentConfigId : 0;
+    const video = document.getElementById('backend-decrypted-video');
+    if (!video) {
+        log('未找到后端解密流播放器节点', 'error');
+        return;
+    }
+
+    await stopBackendDecryptedStream();
+
+    backendStreamConfigId = configId;
+    backendStreamSn = sn;
+    if (!window.MediaSource) {
+        updateBackendPlayerStatus('浏览器不支持 MSE');
+        log('当前浏览器不支持 MediaSource，无法直接测试后端 fMP4 解密流', 'error');
+        return;
+    }
+
+    const streamUrl = buildBackendDecryptedStreamUrl(configId, sn, refresh);
+    updateBackendPlayerStatus(refresh ? '刷新启动中...' : '启动中...');
+    log(`启动后端解密流: config=${configId}, sn=${sn}, refresh=${refresh ? '1' : '0'}`, 'info');
+
+    video.onloadedmetadata = () => {
+        updateBackendPlayerStatus('已加载');
+        log('后端解密流已加载元数据', 'success');
+    };
+    video.onplaying = () => {
+        updateBackendPlayerStatus('播放中');
+        log('后端解密流开始播放', 'success');
+    };
+    video.onerror = () => {
+        updateBackendPlayerStatus('播放失败');
+        log('后端解密流播放失败，请查看后端日志中的 Node/ffmpeg 输出', 'error');
+    };
+
+    startBackendMsePlayback(video, streamUrl);
+}
+
+function appendBufferAsync(sourceBuffer, chunk) {
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            sourceBuffer.removeEventListener('updateend', onUpdateEnd);
+            sourceBuffer.removeEventListener('error', onError);
+        };
+        const onUpdateEnd = () => {
+            cleanup();
+            resolve();
+        };
+        const onError = () => {
+            cleanup();
+            reject(new Error('SourceBuffer 写入失败'));
+        };
+        sourceBuffer.addEventListener('updateend', onUpdateEnd, { once: true });
+        sourceBuffer.addEventListener('error', onError, { once: true });
+        sourceBuffer.appendBuffer(chunk);
+    });
+}
+
+function startBackendMsePlayback(video, streamUrl) {
+    const mediaSource = new MediaSource();
+    backendStreamObjectUrl = URL.createObjectURL(mediaSource);
+    backendStreamAbortController = new AbortController();
+    video.src = backendStreamObjectUrl;
+    video.load();
+
+    mediaSource.addEventListener('sourceopen', async () => {
+        let sourceBuffer = null;
+        try {
+            sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01E, mp4a.40.2"');
+        } catch (error) {
+            updateBackendPlayerStatus('编码不支持');
+            log(`浏览器不支持当前 fMP4 编码: ${error.message}`, 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch(streamUrl, {
+                cache: 'no-store',
+                signal: backendStreamAbortController.signal
+            });
+            if (!response.ok || !response.body) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            updateBackendPlayerStatus('接收数据中...');
+            const reader = response.body.getReader();
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) {
+                    break;
+                }
+                if (value && value.byteLength > 0) {
+                    await appendBufferAsync(sourceBuffer, value);
+                    if (video.paused) {
+                        video.play().catch((error) => {
+                            updateBackendPlayerStatus('等待手动播放');
+                            log(`后端解密流已接收数据，但浏览器阻止自动播放: ${error.message}`, 'warning');
+                        });
+                    }
+                }
+            }
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                return;
+            }
+            updateBackendPlayerStatus('播放失败');
+            log(`后端解密流读取失败: ${error.message}`, 'error');
+        } finally {
+            if (mediaSource.readyState === 'open') {
+                try {
+                    mediaSource.endOfStream();
+                } catch (error) {
+                    console.warn('结束 MediaSource 失败:', error);
+                }
+            }
+        }
+    }, { once: true });
 }
 
 // ==================== 测试配置 ====================
@@ -428,6 +625,7 @@ function testConfig(configId) {
 function stopAllTests() {
     log('停止所有测试', 'info');
     stopCurrentPlayer();
+    stopBackendDecryptedStream();
     currentConfigId = null;
     updateStatus('已停止');
     document.querySelectorAll('.config-item').forEach(item => {
